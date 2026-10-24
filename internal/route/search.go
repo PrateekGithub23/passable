@@ -16,7 +16,16 @@ var ErrNoPath = errors.New("route: no path")
 // edge. For AStar to be exact, every cost must be >= the edge's length in meters.
 type CostFunc func(e int32) float64
 
-// Path is a search result. Edges[i] connects Nodes[i] and Nodes[i+1].
+// Endpoint is a location partway along an edge: Frac of its length from the edge's From node.
+type Endpoint struct {
+	Edge     int32
+	Frac     float64
+	Lat, Lon float64
+}
+
+// Path is a search result. Edges[i] connects Nodes[i] and Nodes[i+1]. For point-to-point
+// searches the partial pieces of the start and end edges are included in Cost and LengthM but
+// not in Edges; Nodes is empty when the cheapest path stays on the shared start/end edge.
 type Path struct {
 	Nodes    []int32
 	Edges    []int32
@@ -25,11 +34,11 @@ type Path struct {
 	Expanded int // nodes popped and settled
 }
 
-// AStar finds the cheapest path using a haversine heuristic, which is admissible because
-// edge lengths are haversine sums along the geometry and costs never undercut length.
+// AStar finds the cheapest node-to-node path using a haversine heuristic, which is admissible
+// because edge lengths are haversine sums along the geometry and costs never undercut length.
 func AStar(g *graph.Graph, cost CostFunc, src, dst int32) (Path, error) {
 	t := g.Nodes[dst]
-	return search(g, cost, src, dst, func(n int32) float64 {
+	return search(g, cost, []seed{{src, 0}}, []seed{{dst, 0}}, func(n int32) float64 {
 		p := g.Nodes[n]
 		return geo.Haversine(p.Lat, p.Lon, t.Lat, t.Lon)
 	})
@@ -37,20 +46,79 @@ func AStar(g *graph.Graph, cost CostFunc, src, dst int32) (Path, error) {
 
 // Dijkstra is the uninformed baseline, used to check AStar.
 func Dijkstra(g *graph.Graph, cost CostFunc, src, dst int32) (Path, error) {
-	return search(g, cost, src, dst, func(int32) float64 { return 0 })
+	return search(g, cost, []seed{{src, 0}}, []seed{{dst, 0}}, zeroH)
 }
 
-func search(g *graph.Graph, cost CostFunc, src, dst int32, h func(int32) float64) (Path, error) {
+// AStarPoints finds the cheapest path between two points snapped onto edges. A partial edge
+// costs the same fraction of the edge's cost as of its length.
+func AStarPoints(g *graph.Graph, cost CostFunc, a, b Endpoint) (Path, error) {
+	return points(g, cost, a, b, func(n int32) float64 {
+		p := g.Nodes[n]
+		return geo.Haversine(p.Lat, p.Lon, b.Lat, b.Lon)
+	})
+}
+
+func points(g *graph.Graph, cost CostFunc, a, b Endpoint, h func(int32) float64) (Path, error) {
+	ca, cb := cost(a.Edge), cost(b.Edge)
+	if math.IsInf(ca, 1) || math.IsInf(cb, 1) {
+		return Path{}, ErrNoPath
+	}
+	ea, eb := &g.Edges[a.Edge], &g.Edges[b.Edge]
+	p, err := search(g, cost,
+		[]seed{{ea.From, a.Frac * ca}, {ea.To, (1 - a.Frac) * ca}},
+		[]seed{{eb.From, b.Frac * cb}, {eb.To, (1 - b.Frac) * cb}}, h)
+
+	if a.Edge == b.Edge {
+		span := math.Abs(a.Frac - b.Frac)
+		if err != nil || span*ca <= p.Cost {
+			return Path{Cost: span * ca, LengthM: span * ea.LengthM, Expanded: p.Expanded}, nil
+		}
+	}
+	if err != nil {
+		return p, err
+	}
+	p.LengthM += partial(ea, a.Frac, p.Nodes[0]) + partial(eb, b.Frac, p.Nodes[len(p.Nodes)-1])
+	return p, nil
+}
+
+// partial is the length from the point at frac to node n, one of e's endpoints.
+func partial(e *graph.Edge, frac float64, n int32) float64 {
+	if n == e.From {
+		return frac * e.LengthM
+	}
+	return (1 - frac) * e.LengthM
+}
+
+func zeroH(int32) float64 { return 0 }
+
+type seed struct {
+	node int32
+	cost float64
+}
+
+// search runs A* from several seeded start nodes to a virtual target reachable from each
+// target node at the given extra cost. h must be consistent and <= each target's extra cost.
+func search(g *graph.Graph, cost CostFunc, seeds, targets []seed, h func(int32) float64) (Path, error) {
 	n := len(g.Nodes)
-	dist := make([]float64, n)
+	virt := int32(n)
+	dist := make([]float64, n+1)
 	for i := range dist {
 		dist[i] = math.Inf(1)
 	}
 	prevEdge := make([]int32, n)
-	settled := make([]bool, n)
+	for i := range prevEdge {
+		prevEdge[i] = -1
+	}
+	settled := make([]bool, n+1)
+	last := int32(-1) // target node through which the virtual target was best reached
 
-	dist[src] = 0
-	pq := minHeap{{node: src, f: h(src)}}
+	var pq minHeap
+	for _, s := range seeds {
+		if s.cost < dist[s.node] {
+			dist[s.node] = s.cost
+			pq.push(item{node: s.node, f: s.cost + h(s.node)})
+		}
+	}
 	expanded := 0
 	for len(pq) > 0 {
 		cur := pq.pop()
@@ -59,9 +127,18 @@ func search(g *graph.Graph, cost CostFunc, src, dst int32, h func(int32) float64
 			continue // stale entry (lazy deletion)
 		}
 		settled[u] = true
+		if u == virt {
+			return buildPath(g, prevEdge, last, dist[virt], expanded), nil
+		}
 		expanded++
-		if u == dst {
-			return buildPath(g, cost, prevEdge, src, dst, dist[dst], expanded), nil
+		for _, t := range targets {
+			if t.node == u {
+				if d := dist[u] + t.cost; d < dist[virt] {
+					dist[virt] = d
+					last = u
+					pq.push(item{node: virt, f: d})
+				}
+			}
 		}
 		for _, ei := range g.Incident(u) {
 			c := cost(ei)
@@ -82,16 +159,17 @@ func search(g *graph.Graph, cost CostFunc, src, dst int32, h func(int32) float64
 	return Path{Expanded: expanded}, ErrNoPath
 }
 
-func buildPath(g *graph.Graph, cost CostFunc, prevEdge []int32, src, dst int32, total float64, expanded int) Path {
+func buildPath(g *graph.Graph, prevEdge []int32, last int32, total float64, expanded int) Path {
 	p := Path{Cost: total, Expanded: expanded}
-	for v := dst; v != src; {
+	v := last
+	for prevEdge[v] >= 0 {
 		ei := prevEdge[v]
 		p.Edges = append(p.Edges, ei)
 		p.Nodes = append(p.Nodes, v)
 		p.LengthM += g.Edges[ei].LengthM
 		v = g.Edges[ei].Other(v)
 	}
-	p.Nodes = append(p.Nodes, src)
+	p.Nodes = append(p.Nodes, v)
 	reverse(p.Nodes)
 	reverse(p.Edges)
 	return p

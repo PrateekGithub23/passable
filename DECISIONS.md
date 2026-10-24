@@ -76,3 +76,18 @@ Each entry: what was chosen, what was rejected, and why.
 **Chose:** before searching, snap each endpoint to the nearest node in the largest connected component of the edges the profile can use.
 **Rejected:** snapping to the nearest node in the full graph.
 **Why:** on a real campus pair (SLC → Hagey Hall), the nearest node sat in a 9-node pocket that only steps lead out of, so wheelchair and stroller searches failed with "no route" even though a step-free route exists. Profile-aware snapping moved the start 3.3 m (from 25.2 m to 28.5 m away) and found a 569 m step-free route. Day 3's edge snapping applies the same rule and reports the snap distance, so the user can see when the nearest usable path is far away.
+
+## 13. Snapping: PostGIS KNN for candidates, exact projection in Go, routes start mid-edge
+**Chose:** fetch the 20 nearest edges with `ORDER BY geom <-> point` (GiST index). Then project the point onto each edge's geometry in Go, re-rank by distance in meters, and keep the nearest edge the profile can use within 150 m. The search seeds both endpoints of the start edge with the matching fraction of that edge's cost, and finishes through a virtual target joined to both endpoints of the end edge. When start and end share an edge, the direct piece is also a candidate.
+**Rejected:** snapping to the nearest node, which can add up to half an edge of detour and put the start on the wrong side of a barrier. Also rejected: `ST_ClosestPoint`/`ST_LineLocatePoint` in SQL, whose fraction is planar (by degrees) and wouldn't match the haversine edge lengths.
+**Why:** routes start where the user actually is. The heuristic stays admissible because a partial edge's cost is at least the straight-line distance to the snapped point. Covered by `TestAStarPointsMatchesDijkstra`, which includes the shared-edge case.
+
+## 14. "No accessible route" returns the route with the fewest barriers, and names them
+**Chose:** when either point has no usable edge within 150 m, or the search finds no path, route again with each blocked edge costed at `10,000 + 10 × length` instead of +Inf. The response comes back with `accessible: false`, a `barriers` list (description, reasons, location) and a note.
+**Rejected:** returning an error or an empty route.
+**Why:** "no route" is useless to someone in a wheelchair. "The only way through crosses these steps at this spot" is actionable, and it's what the planned elevator-out hazards will need. The large constant makes barrier count dominate distance. On today's static data this never triggers: all 237 steps-edge midpoints have a usable path within 150 m (40 of them got a "nearest path not usable" snap note instead). It is tested on a synthetic graph (`TestPlanExplainsBarrier`).
+
+## 15. Place search: OSM named features + pg_trgm, with UW building codes
+**Chose:** a `places` table of named buildings, amenities, shops, leisure, tourism and office features (1,458 rows), using way and relation centers. Search runs over one generated lowercased column (`name ref aliases`). An exact `ref` match scores 1.0, a word-prefix regex match 0.9 (GIN trigram index), and otherwise `word_similarity` handles typos. Aliases include `old_name`/`old_ref`, because UW renamed Engineering 7 to the Pearl Sullivan Engineering Building and people still search for "E7".
+**Rejected:** plain substring `LIKE` (in a test, "dc" matched "Chil**dc**are"), and deduping by name alone (it merged 13 Tim Hortons locations into one).
+**Note:** `002_places.sql` is an init script like `001`. On the existing dev volume it was applied by hand with `psql`. Day 5 brings in a real migration tool, as the plan says.

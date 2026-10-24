@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download the raw OSM data for the bbox into data/ (ways with geometry, plus kerb/crossing nodes).
+# Download the raw OSM data for the bbox into data/: ways with geometry, kerb/crossing nodes, named places.
 # Usage: scripts/fetch_osm.sh       (OVERPASS=<mirror url> to override the endpoint)
 set -euo pipefail
 
@@ -35,8 +35,15 @@ sleep 2
 fetch "[out:json][timeout:180];
 (node[\"kerb\"]($BBOX); node[\"highway\"=\"crossing\"]($BBOX););
 out;" "$OUT/nodes.json"
+sleep 2
 
-for f in ways nodes; do
+# Named places for search; "out center" gives ways and relations a single point.
+fetch "[out:json][timeout:180];
+(nwr[\"name\"][\"building\"]($BBOX); nwr[\"name\"][\"amenity\"]($BBOX); nwr[\"name\"][\"shop\"]($BBOX);
+ nwr[\"name\"][\"leisure\"]($BBOX); nwr[\"name\"][\"tourism\"]($BBOX); nwr[\"name\"][\"office\"]($BBOX););
+out center tags;" "$OUT/places.json"
+
+for f in ways nodes places; do
   n=$(jq '.elements | length' "$OUT/$f.json")
   printf '%-12s %8s elements  (%s)\n' "$f.json" "$n" "$(du -h "$OUT/$f.json" | cut -f1)"
   [ "$n" -gt 0 ] || { echo "ERROR: $f.json is empty; check the query or bbox" >&2; exit 1; }

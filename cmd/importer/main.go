@@ -1,5 +1,5 @@
-// Command importer loads Overpass JSON (ways with geometry + tagged nodes) into the
-// nodes/edges tables, splitting ways into graph edges at intersections.
+// Command importer loads Overpass JSON (ways with geometry, tagged nodes, named places) into
+// the nodes/edges/places tables, splitting ways into graph edges at intersections.
 package main
 
 import (
@@ -31,7 +31,18 @@ type element struct {
 	Lon      float64           `json:"lon"`
 	Nodes    []int64           `json:"nodes"`
 	Geometry []latLon          `json:"geometry"`
+	Center   *latLon           `json:"center"` // ways/relations with "out center"
 	Tags     map[string]string `json:"tags"`
+}
+
+type place struct {
+	osmType  string
+	osmID    int64
+	name     string
+	ref      *string
+	aliases  *string
+	kind     string
+	lat, lon float64
 }
 
 type overpassFile struct {
@@ -60,6 +71,7 @@ type edge struct {
 func main() {
 	waysPath := flag.String("ways", "data/ways.json", "Overpass JSON with ways (out geom)")
 	nodesPath := flag.String("nodes", "data/nodes.json", "Overpass JSON with kerb/crossing nodes")
+	placesPath := flag.String("places", "data/places.json", "Overpass JSON with named places (out center)")
 	dbURL := flag.String("db", "postgres://passable:passable@localhost:5433/passable", "Postgres connection URL")
 	flag.Parse()
 
@@ -80,9 +92,16 @@ func main() {
 		}
 	}
 
+	placeElems, err := readElements(*placesPath)
+	if err != nil {
+		log.Fatalf("read places: %v", err)
+	}
+
 	edges, coords, skipped := buildEdges(ways, kerbs)
 	log.Printf("ways=%d -> edges=%d (skipped %d zero-length/self-loop stretches), graph nodes=%d, kerb nodes=%d",
 		len(ways), len(edges), skipped, len(coords), len(kerbs))
+	places := buildPlaces(placeElems)
+	log.Printf("places=%d (from %d elements)", len(places), len(placeElems))
 
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, *dbURL)
@@ -91,7 +110,7 @@ func main() {
 	}
 	defer conn.Close(ctx)
 
-	if err := load(ctx, conn, coords, edges); err != nil {
+	if err := load(ctx, conn, coords, edges, places); err != nil {
 		log.Fatalf("load: %v", err)
 	}
 	log.Printf("import committed in %s", time.Since(start).Round(time.Millisecond))
@@ -213,14 +232,14 @@ func makeEdge(w element, i, j int, kerbs map[int64]string) (edge, bool) {
 	}, true
 }
 
-func load(ctx context.Context, conn *pgx.Conn, coords map[int64]latLon, edges []edge) error {
+func load(ctx context.Context, conn *pgx.Conn, coords map[int64]latLon, edges []edge, places []place) error {
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx, "TRUNCATE edges, nodes RESTART IDENTITY CASCADE"); err != nil {
+	if _, err := tx.Exec(ctx, "TRUNCATE edges, nodes, places RESTART IDENTITY CASCADE"); err != nil {
 		return err
 	}
 
@@ -279,7 +298,65 @@ func load(ctx context.Context, conn *pgx.Conn, coords map[int64]latLon, edges []
 		}
 	}
 
+	for b := 0; b < len(places); b += batchSize {
+		chunk := places[b:min(b+batchSize, len(places))]
+		n := len(chunk)
+		types, names, kinds := make([]string, n), make([]string, n), make([]string, n)
+		ids := make([]int64, n)
+		refs, aliases := make([]*string, n), make([]*string, n)
+		lats, lons := make([]float64, n), make([]float64, n)
+		for k, p := range chunk {
+			types[k], ids[k], names[k], refs[k], aliases[k], kinds[k] = p.osmType, p.osmID, p.name, p.ref, p.aliases, p.kind
+			lats[k], lons[k] = p.lat, p.lon
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO places (osm_type, osm_id, name, ref, aliases, kind, geom)
+			SELECT t, id, name, ref, aliases, kind, ST_SetSRID(ST_MakePoint(lon, lat), 4326)
+			FROM unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::text[], $6::text[], $7::float8[], $8::float8[])
+			  AS u(t, id, name, ref, aliases, kind, lat, lon)`,
+			types, ids, names, refs, aliases, kinds, lats, lons); err != nil {
+			return fmt.Errorf("insert places: %w", err)
+		}
+	}
+
 	return tx.Commit(ctx)
+}
+
+// buildPlaces keeps named elements that have a location, classifying each by its main tag.
+func buildPlaces(elems []element) []place {
+	var out []place
+	for _, el := range elems {
+		name := el.Tags["name"]
+		lat, lon := el.Lat, el.Lon
+		if el.Center != nil {
+			lat, lon = el.Center.Lat, el.Center.Lon
+		}
+		if name == "" || (lat == 0 && lon == 0) {
+			continue
+		}
+		kind := ""
+		for _, k := range []string{"amenity", "shop", "leisure", "tourism", "office", "building"} {
+			if v := el.Tags[k]; v != "" && v != "yes" {
+				kind = v
+				break
+			}
+		}
+		if kind == "" {
+			kind = "building"
+		}
+		var aliases []string
+		for _, k := range []string{"short_name", "alt_name", "official_name", "old_name", "old_ref", "loc_name"} {
+			if v := el.Tags[k]; v != "" && v != name {
+				aliases = append(aliases, v)
+			}
+		}
+		p := place{osmType: el.Type, osmID: el.ID, name: name, ref: tagPtr(el.Tags, "ref"), kind: kind, lat: lat, lon: lon}
+		if len(aliases) > 0 {
+			p.aliases = ptr(strings.Join(aliases, " "))
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // parseWidth accepts "1.5" or "1.5 m"; anything else (feet, ranges) is treated as unknown.
