@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    # No official arm64 build of this tag; run under emulation on Apple Silicon.
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: passable
+      POSTGRES_PASSWORD: passable
+      POSTGRES_DB: passable
+    # Host port 5433: a local Postgres already owns 5432.
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Init scripts only run on first volume creation; schema changes need `docker compose down -v`.
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U passable -d passable"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
