@@ -29,6 +29,7 @@ func main() {
 	profileS := flag.String("profile", "", "profile (default: all)")
 	flag.Parse()
 
+	// Step 1: parse inputs. No -profile means "compare all three".
 	from, err := parseLatLng(*fromS)
 	if err != nil {
 		log.Fatalf("-from: %v", err)
@@ -46,6 +47,7 @@ func main() {
 		profiles = []cost.Profile{p}
 	}
 
+	// Step 2: load the whole graph into memory, then close the DB; routing never needs it.
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, *dbURL)
 	if err != nil {
@@ -61,6 +63,7 @@ func main() {
 	fmt.Printf("graph: %d nodes, %d edges, %d components (largest %d nodes)\n\n",
 		len(g.Nodes), len(g.Edges), len(sizes), slices.Max(sizes))
 
+	// Step 3: route once per profile and print a summary of each.
 	paths := map[cost.Profile]route.Path{}
 	for _, p := range profiles {
 		table := cost.Table(g, p)
@@ -82,6 +85,8 @@ func main() {
 		printSummary(g, p, path, elapsed)
 	}
 
+	// Step 4: how different are the routes? Shared length as a % of the longer route
+	// (100% = identical routes, low % = the profiles really chose different paths).
 	if len(paths) > 1 {
 		fmt.Println("\nshared length between profiles:")
 		for i, a := range profiles {
@@ -96,6 +101,8 @@ func main() {
 	}
 }
 
+// printSummary prints length, cost, search effort, and what the route passes through:
+// steps and crossings counted, metres per confidence label, and how often each penalty applied.
 func printSummary(g *graph.Graph, p cost.Profile, path route.Path, elapsed time.Duration) {
 	var steps, crossings int
 	conf := map[cost.Confidence]float64{}
