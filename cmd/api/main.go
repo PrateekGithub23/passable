@@ -1,6 +1,9 @@
 // Command api serves the Passable HTTP API.
 //
-//	go run ./cmd/api [-addr :8080] [-db postgres://...]   (or DATABASE_URL / PORT env vars)
+//	go run ./cmd/api [-addr :8080] [-db postgres://...] [-cors http://localhost:3000]
+//
+// Each flag can also come from an env var (PORT, DATABASE_URL, CORS_ORIGINS), which is how
+// hosting platforms pass configuration.
 package main
 
 import (
@@ -11,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +26,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":"+envOr("PORT", "8080"), "listen address")
 	dbURL := flag.String("db", envOr("DATABASE_URL", "postgres://passable:passable@localhost:5433/passable"), "Postgres connection URL")
+	cors := flag.String("cors", envOr("CORS_ORIGINS", "http://localhost:3000"), "comma-separated origins allowed to call the API from a browser")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -41,7 +46,7 @@ func main() {
 	srv := api.New(pool, g)
 	log.Printf("graph loaded: %d nodes, %d edges in %s", len(g.Nodes), len(g.Edges), time.Since(start).Round(time.Millisecond))
 
-	hs := &http.Server{Addr: *addr, Handler: srv, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}
+	hs := &http.Server{Addr: *addr, Handler: api.WithCORS(srv, strings.Split(*cors, ",")), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

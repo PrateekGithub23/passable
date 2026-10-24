@@ -3,6 +3,7 @@ package api
 import (
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
 
@@ -99,5 +100,29 @@ func TestPlanTooFar(t *testing.T) {
 	}
 	if _, status, _ := s.plan(cost.Wheelchair, far, near(g, 3, 0.5)); status != http.StatusUnprocessableEntity {
 		t.Errorf("status %d, want 422", status)
+	}
+}
+
+func TestCORS(t *testing.T) {
+	h := WithCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), []string{"http://localhost:3000"})
+	cases := []struct {
+		origin, method, wantAllow string
+		wantStatus                int
+	}{
+		{"http://localhost:3000", http.MethodGet, "http://localhost:3000", http.StatusOK},
+		{"https://evil.example", http.MethodGet, "", http.StatusOK}, // served, but the browser won't expose it
+		{"http://localhost:3000", http.MethodOptions, "http://localhost:3000", http.StatusNoContent},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(c.method, "/api/v1/route", nil)
+		req.Header.Set("Origin", c.origin)
+		if c.method == http.MethodOptions {
+			req.Header.Set("Access-Control-Request-Method", "POST")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != c.wantAllow || rec.Code != c.wantStatus {
+			t.Errorf("%s %s: allow-origin %q status %d, want %q %d", c.method, c.origin, got, rec.Code, c.wantAllow, c.wantStatus)
+		}
 	}
 }

@@ -2,7 +2,7 @@
 
 Accessibility-aware pedestrian routing for the University of Waterloo campus and uptown Waterloo. Passable finds routes for three profiles. `wheelchair` treats steps as impassable and penalizes or blocks bad surfaces and missing or high kerbs. `stroller` blocks steps and applies milder penalties. `walk_winter` applies soft penalties and reacts strongly to hazards. Each segment is labelled `verified`, `inferred` or `unknown`, so the route says how much it trusts the map data. People can report hazards (elevator out, blocked sidewalk, ice); reports decay over time and are confirmed or resolved by votes. A copy-on-write overlay applies the reports to routing without blocking route queries, and anyone whose active route crosses an affected edge is told over WebSocket.
 
-> Status: Day 3 of 10. OSM import, in-memory graph, per-profile cost model, A* routing, HTTP route and place-search API.
+> Status: Day 4 of 10. OSM import, in-memory graph, per-profile cost model, A* routing, HTTP API, and a map UI: click two points and see the route for each profile.
 
 ## Running locally
 
@@ -15,9 +15,13 @@ scripts/fetch_osm.sh          # downloads data/ways.json and data/nodes.json
 go run ./cmd/importer         # loads the graph (flags: -ways, -nodes, -db)
 go run ./cmd/route -from 43.4718,-80.5452 -to 43.4685,-80.5418   # SLC -> Hagey Hall, all profiles
 go run ./cmd/bench            # latency / nodes-expanded benchmark
-go run ./cmd/api              # HTTP API on :8080 (flags -addr, -db; or PORT / DATABASE_URL)
+go run ./cmd/api              # HTTP API on :8080 (flags -addr, -db, -cors; or PORT / DATABASE_URL / CORS_ORIGINS)
 go test -race ./...
+
+cd web && npm install && npm run dev   # map UI on http://localhost:3000
 ```
+
+In the UI, click once for the start and again for the destination, then switch profiles to compare routes. Line colours show confidence: dark blue is verified, light blue is inferred, and dashed amber is unknown. Red marks barriers. A dotted grey line joins each clicked point to where the route actually starts on the network.
 
 If Overpass rate-limits you, set `OVERPASS=https://overpass.kumi.systems/api/interpreter`.
 

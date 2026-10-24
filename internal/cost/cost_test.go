@@ -2,6 +2,7 @@ package cost
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/PrateekGithub23/passable/internal/graph"
@@ -58,6 +59,9 @@ func TestEvaluate(t *testing.T) {
 			r := Evaluate(p, &e)
 			if got := r.Cost(e.LengthM); math.Abs(got-want) > 1e-9 && !(math.IsInf(got, 1) && math.IsInf(want, 1)) {
 				t.Errorf("%s / %s: cost %.2f, want %.2f (reasons %v)", tc.name, p, got, want, r.Reasons)
+			}
+			if len(r.Reasons) != len(slices.Compact(slices.Clone(r.Reasons))) {
+				t.Errorf("%s / %s: duplicate reasons %v", tc.name, p, r.Reasons)
 			}
 			if !r.Blocked && r.Confidence != tc.conf {
 				t.Errorf("%s / %s: confidence %s, want %s", tc.name, p, r.Confidence, tc.conf)
