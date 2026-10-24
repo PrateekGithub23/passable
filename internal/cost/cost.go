@@ -8,6 +8,7 @@ package cost
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/PrateekGithub23/passable/internal/graph"
 )
@@ -128,16 +129,23 @@ func Evaluate(p Profile, e *graph.Edge) Result {
 		r.Blocked = true
 		r.Reasons = append(r.Reasons, why)
 	}
+	// One factor (e.g. steps for walk_winter) can add both a multiplier and a penalty; its
+	// reason is recorded once.
+	addReason := func(why string) {
+		if !slices.Contains(r.Reasons, why) {
+			r.Reasons = append(r.Reasons, why)
+		}
+	}
 	mult := func(m float64, why string) {
 		if m > 1 {
 			r.Multiplier *= m
-			r.Reasons = append(r.Reasons, why)
+			addReason(why)
 		}
 	}
 	penalty := func(m float64, why string) {
 		if m > 0 {
 			r.PenaltyM += m
-			r.Reasons = append(r.Reasons, why)
+			addReason(why)
 		}
 	}
 	downgrade := func(c Confidence) {

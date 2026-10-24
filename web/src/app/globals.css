@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/* Light theme only for now: the basemap style is light, and the panel uses explicit greys. */
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+}
+
+body {
+  background: #ffffff;
+  color: #171717;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}

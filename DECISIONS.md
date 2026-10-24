@@ -91,3 +91,17 @@ Each entry: what was chosen, what was rejected, and why.
 **Chose:** a `places` table of named buildings, amenities, shops, leisure, tourism and office features (1,458 rows), using way and relation centers. Search runs over one generated lowercased column (`name ref aliases`). An exact `ref` match scores 1.0, a word-prefix regex match 0.9 (GIN trigram index), and otherwise `word_similarity` handles typos. Aliases include `old_name`/`old_ref`, because UW renamed Engineering 7 to the Pearl Sullivan Engineering Building and people still search for "E7".
 **Rejected:** plain substring `LIKE` (in a test, "dc" matched "Chil**dc**are"), and deduping by name alone (it merged 13 Tim Hortons locations into one).
 **Note:** `002_places.sql` is an init script like `001`. On the existing dev volume it was applied by hand with `psql`. Day 5 brings in a real migration tool, as the plan says.
+
+## 16. Frontend: MapLibre loaded only in the browser, OpenFreeMap basemap, state owned by one component
+**Chose:**
+- **One owner of state.** `Planner` (client component) holds start, end, profile and the last result. `MapView`, `RoutePanel`, `ProfileSelector` and `RouteSegmentList` only render props.
+- **MapLibre loads only in the browser.** It's created inside `useEffect` with a dynamic `import("maplibre-gl")`, so it never runs during Next's server prerender. Its Web Worker script is copied into `public/` by `predev`/`prebuild` and set with `setWorkerUrl`, because the bundler can't trace maplibre-gl 6's runtime-built worker URL.
+- **Free basemap:** OpenFreeMap vector tiles. No API key, no account, and the style is MapLibre-native.
+- **Loading is derived, not stored.** Each result is saved with the request key (points + profile) it answers, and a result whose key doesn't match the current inputs is ignored. Stale responses can't appear, and the React lint rule against `setState` inside effects is satisfied.
+
+**Rejected:** a global state library (three components don't need one); Mapbox GL or Google Maps (both need keys and paid tiers); `next/dynamic` with `ssr: false` for the whole map (it works too, but an effect-scoped import keeps the browser-only boundary inside one file).
+**Why:** the setup is simple, free, and easy to explain. Verified end to end in headless Chrome: two clicks route SLC → Hagey Hall (wheelchair 560 m; switching to winter walk gives 622 m via steps), with no console or network errors.
+
+## 17. CORS: echo allowlisted origins instead of `*`
+**Chose:** `api.WithCORS` sets `Access-Control-Allow-Origin` only for origins listed in `CORS_ORIGINS` (default `http://localhost:3000`), adds `Vary: Origin`, and answers preflight requests for the upcoming POST endpoints.
+**Why:** the frontend and API are on different origins in development (ports 3000 and 8080) and in production (Vercel and Fly.io). An allowlist stops arbitrary sites from calling the API from a visitor's browser, which matters once hazard reports are accepted.
