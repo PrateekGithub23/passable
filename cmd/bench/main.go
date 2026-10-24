@@ -32,6 +32,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}
+	// Graph memory = heap growth across the load, each side measured after a GC so garbage
+	// from parsing doesn't count.
 	before := heapAfterGC()
 	loadStart := time.Now()
 	g, err := graph.Load(ctx, conn)
@@ -55,6 +57,8 @@ func main() {
 		tableTime := time.Since(tableStart)
 		costFn := func(e int32) float64 { return table[e] }
 
+		// Pick query endpoints only from the profile's main network, so every query has an
+		// answer and we measure search time, not "no route" failures.
 		comp, sizes := g.Components(func(e int32) bool { return !math.IsInf(table[e], 1) })
 		main := int32(slices.Index(sizes, slices.Max(sizes)))
 		var pool []int32
@@ -64,12 +68,15 @@ func main() {
 			}
 		}
 
+		// Fixed seed: every run (and every benchmark day) uses the same query pairs, so
+		// numbers are comparable over time.
 		r := rand.New(rand.NewSource(*seed))
 		lat := make([]time.Duration, 0, *n)
 		exp := make([]int, 0, *n)
 		var crow, length float64
 		for q := 0; q < *n; q++ {
 			src, dst := pool[r.Intn(len(pool))], pool[r.Intn(len(pool))]
+			// Time only the search itself.
 			start := time.Now()
 			path, err := route.AStar(g, costFn, src, dst)
 			lat = append(lat, time.Since(start))
@@ -81,6 +88,7 @@ func main() {
 			crow += geo.Haversine(a.Lat, a.Lon, b.Lat, b.Lon)
 			length += path.LengthM
 		}
+		// Sort so percentiles are just indexes into the slice.
 		slices.Sort(lat)
 		slices.Sort(exp)
 		mean := 0
@@ -93,10 +101,12 @@ func main() {
 	}
 }
 
+// pct returns the p-th percentile of an already sorted slice (nearest-rank method).
 func pct(sorted []time.Duration, p int) time.Duration {
 	return sorted[(len(sorted)-1)*p/100].Round(time.Microsecond)
 }
 
+// heapAfterGC forces a garbage collection and returns the live heap size in bytes.
 func heapAfterGC() uint64 {
 	runtime.GC()
 	var m runtime.MemStats

@@ -8,6 +8,8 @@ BBOX="43.455,-80.565,43.485,-80.505" # south,west,north,east
 PED='["highway"~"^(footway|path|pedestrian)$"]'
 
 # count <element filter>: prints the total element count for the filter in the bbox.
+# "out count;" makes Overpass return only totals, not the data, so each query is tiny.
+# Retries handle Overpass rate limiting (HTTP 429/504), which is common on the public server.
 count() {
   local q="[out:json][timeout:90];$1($BBOX);out count;"
   local body attempt
@@ -25,6 +27,7 @@ count() {
 
 row() { printf '%-42s %8s\n' "$1" "$2"; }
 
+# Each count is printed as it arrives; the 2 s sleeps keep us under Overpass's rate limit.
 echo "Overpass: $OVERPASS"
 echo "BBox:     $BBOX"
 echo
