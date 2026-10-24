@@ -25,6 +25,8 @@ type Edge struct {
 	WidthM     float64
 	HasSteps   bool
 	IsCrossing bool
+	Name       string  // OSM name tag, for explanations
+	Geom       []Point // ordered From -> To
 }
 
 // Other returns the endpoint of e that is not n.

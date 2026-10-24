@@ -144,3 +144,53 @@ func TestSameNodeAndBlocked(t *testing.T) {
 		t.Fatalf("blocked reverse: want ErrNoPath, got %+v %v", p, err)
 	}
 }
+
+// TestAStarPointsMatchesDijkstra checks point-to-point search, including the shared-edge case.
+func TestAStarPointsMatchesDijkstra(t *testing.T) {
+	r := rand.New(rand.NewSource(2))
+	sameEdge := 0
+	for trial := 0; trial < 20; trial++ {
+		g := randomGraph(r, 300, 3)
+		cost := randomCosts(r, g)
+		randomPoint := func() Endpoint {
+			ei := int32(r.Intn(len(g.Edges)))
+			e, f := g.Edges[ei], r.Float64()
+			a, b := g.Nodes[e.From], g.Nodes[e.To]
+			return Endpoint{Edge: ei, Frac: f, Lat: a.Lat + f*(b.Lat-a.Lat), Lon: a.Lon + f*(b.Lon-a.Lon)}
+		}
+		for q := 0; q < 50; q++ {
+			a, b := randomPoint(), randomPoint()
+			if q%10 == 0 {
+				b.Edge, b.Frac = a.Edge, r.Float64()
+				sameEdge++
+			}
+			pa, errA := AStarPoints(g, cost, a, b)
+			pd, errD := points(g, cost, a, b, zeroH)
+			if (errA == nil) != (errD == nil) {
+				t.Fatalf("trial %d: AStar err=%v, Dijkstra err=%v", trial, errA, errD)
+			}
+			if errA != nil {
+				continue
+			}
+			if math.Abs(pa.Cost-pd.Cost) > 1e-6*math.Max(1, pd.Cost) {
+				t.Fatalf("trial %d: AStar cost %.6f != Dijkstra %.6f", trial, pa.Cost, pd.Cost)
+			}
+			if pa.LengthM <= 0 && a.Frac != b.Frac {
+				t.Fatalf("trial %d: non-positive length %+v", trial, pa)
+			}
+		}
+	}
+	t.Logf("%d shared-edge queries", sameEdge)
+}
+
+func TestAStarPointsSameEdgeDirect(t *testing.T) {
+	g := graph.New(
+		[]graph.Node{{OSMID: 1, Lat: 43.46, Lon: -80.54}, {OSMID: 2, Lat: 43.461, Lon: -80.54}},
+		[]graph.Edge{{ID: 1, From: 0, To: 1, LengthM: 111.2}},
+	)
+	cost := func(e int32) float64 { return 2 * g.Edges[e].LengthM }
+	p, err := AStarPoints(g, cost, Endpoint{Edge: 0, Frac: 0.2, Lat: 43.4602, Lon: -80.54}, Endpoint{Edge: 0, Frac: 0.7, Lat: 43.4607, Lon: -80.54})
+	if err != nil || len(p.Nodes) != 0 || math.Abs(p.LengthM-0.5*111.2) > 1e-9 || math.Abs(p.Cost-111.2) > 1e-9 {
+		t.Fatalf("got %+v, %v", p, err)
+	}
+}

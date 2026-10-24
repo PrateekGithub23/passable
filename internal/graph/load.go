@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -40,7 +41,8 @@ func Load(ctx context.Context, db Querier) (*Graph, error) {
 		       coalesce(wheelchair,''), coalesce(kerb_start,''), coalesce(kerb_end,''),
 		       coalesce(width_m, 0), has_steps, is_crossing,
 		       coalesce(tags->>'sidewalk',''), coalesce(tags->>'sidewalk:both',''),
-		       coalesce(tags->>'sidewalk:left',''), coalesce(tags->>'sidewalk:right','')
+		       coalesce(tags->>'sidewalk:left',''), coalesce(tags->>'sidewalk:right',''),
+		       coalesce(tags->>'name',''), ST_AsGeoJSON(geom)
 		FROM edges ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("query edges: %w", err)
@@ -49,13 +51,21 @@ func Load(ctx context.Context, db Querier) (*Graph, error) {
 	for rows.Next() {
 		var e Edge
 		var from, to int64
-		var sw, swBoth, swLeft, swRight string
+		var sw, swBoth, swLeft, swRight, geojson string
 		if err := rows.Scan(&e.ID, &from, &to, &e.LengthM, &e.Highway,
 			&e.Footway, &e.Surface, &e.Smoothness, &e.Incline,
 			&e.Wheelchair, &e.KerbStart, &e.KerbEnd,
 			&e.WidthM, &e.HasSteps, &e.IsCrossing,
-			&sw, &swBoth, &swLeft, &swRight); err != nil {
+			&sw, &swBoth, &swLeft, &swRight, &e.Name, &geojson); err != nil {
 			return nil, err
+		}
+		var line struct{ Coordinates [][2]float64 }
+		if err := json.Unmarshal([]byte(geojson), &line); err != nil || len(line.Coordinates) < 2 {
+			return nil, fmt.Errorf("edge %d: bad geometry: %v", e.ID, err)
+		}
+		e.Geom = make([]Point, len(line.Coordinates))
+		for i, c := range line.Coordinates {
+			e.Geom[i] = Point{Lat: c[1], Lon: c[0]}
 		}
 		var ok1, ok2 bool
 		e.From, ok1 = idx[from]

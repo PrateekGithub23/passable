@@ -2,7 +2,7 @@
 
 Accessibility-aware pedestrian routing for the University of Waterloo campus and uptown Waterloo. Passable finds routes for three profiles. `wheelchair` treats steps as impassable and penalizes or blocks bad surfaces and missing or high kerbs. `stroller` blocks steps and applies milder penalties. `walk_winter` applies soft penalties and reacts strongly to hazards. Each segment is labelled `verified`, `inferred` or `unknown`, so the route says how much it trusts the map data. People can report hazards (elevator out, blocked sidewalk, ice); reports decay over time and are confirmed or resolved by votes. A copy-on-write overlay applies the reports to routing without blocking route queries, and anyone whose active route crosses an affected edge is told over WebSocket.
 
-> Status: Day 2 of 10. OSM import, in-memory graph, per-profile cost model, A* routing CLI, first benchmark.
+> Status: Day 3 of 10. OSM import, in-memory graph, per-profile cost model, A* routing, HTTP route and place-search API.
 
 ## Running locally
 
@@ -15,10 +15,30 @@ scripts/fetch_osm.sh          # downloads data/ways.json and data/nodes.json
 go run ./cmd/importer         # loads the graph (flags: -ways, -nodes, -db)
 go run ./cmd/route -from 43.4718,-80.5452 -to 43.4685,-80.5418   # SLC -> Hagey Hall, all profiles
 go run ./cmd/bench            # latency / nodes-expanded benchmark
+go run ./cmd/api              # HTTP API on :8080 (flags -addr, -db; or PORT / DATABASE_URL)
 go test -race ./...
 ```
 
 If Overpass rate-limits you, set `OVERPASS=https://overpass.kumi.systems/api/interpreter`.
+
+## API
+
+```sh
+curl 'localhost:8080/api/v1/route?from=43.4718,-80.5452&to=43.4685,-80.5418&profile=wheelchair'
+curl 'localhost:8080/api/v1/places?q=dc'
+curl localhost:8080/healthz
+```
+
+`/route` takes `from` and `to` as `lat,lng` inside the bbox, plus `profile` (`wheelchair`, `stroller` or `walk_winter`). The response includes:
+- `accessible`, `distance_m`, `cost`, `nodes_expanded` and `search_ms`;
+- `snap`: the edge each point snapped to, and how far away it was;
+- `confidence_m`: meters labelled verified, inferred and unknown;
+- `notes`: plain-language warnings;
+- `segments`: consecutive edges with the same description, name, surface, kerb, confidence and penalties, merged, each with `[lon, lat]` coordinates.
+
+When no fully accessible route exists, the response has `accessible: false` and a `barriers` list naming what blocks the profile.
+
+`/places?q=` matches UW building codes exactly (`dc`, `slc`, `e7`), matches word prefixes (`dav`), and tolerates typos (`dana portr`).
 
 ## Routing performance (Day 2)
 
