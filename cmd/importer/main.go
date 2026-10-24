@@ -8,12 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/PrateekGithub23/passable/internal/geo"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -155,7 +155,7 @@ func makeEdge(w element, i, j int, kerbs map[int64]string) (edge, bool) {
 	pts := w.Geometry[i : j+1]
 	length := 0.0
 	for k := 1; k < len(pts); k++ {
-		length += haversine(pts[k-1], pts[k])
+		length += geo.Haversine(pts[k-1].Lat, pts[k-1].Lon, pts[k].Lat, pts[k].Lon)
 	}
 	if from == to || length == 0 {
 		return edge{}, false
@@ -280,17 +280,6 @@ func load(ctx context.Context, conn *pgx.Conn, coords map[int64]latLon, edges []
 	}
 
 	return tx.Commit(ctx)
-}
-
-// haversine returns the great-circle distance in meters.
-func haversine(a, b latLon) float64 {
-	const r = 6371008.8
-	toRad := math.Pi / 180
-	dLat := (b.Lat - a.Lat) * toRad
-	dLon := (b.Lon - a.Lon) * toRad
-	h := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(a.Lat*toRad)*math.Cos(b.Lat*toRad)*math.Sin(dLon/2)*math.Sin(dLon/2)
-	return 2 * r * math.Asin(math.Sqrt(h))
 }
 
 // parseWidth accepts "1.5" or "1.5 m"; anything else (feet, ranges) is treated as unknown.
