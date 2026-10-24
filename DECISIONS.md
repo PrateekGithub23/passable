@@ -35,3 +35,44 @@ Each entry: what was chosen, what was rejected, and why.
 ## 7. Local environment: Postgres on host port 5433, PostGIS image under amd64
 **Chose:** map the container to `localhost:5433`, and set `platform: linux/amd64` on the db service.
 **Why:** a local Postgres already uses 5432. `postgis/postgis:16-3.4` has no arm64 build, so on Apple Silicon it runs under emulation. That is slower but fine for development. The importer's default `-db` points at 5433.
+
+## 8. Cost model: length multipliers plus fixed penalties, with hard blocks only where a profile truly cannot pass
+**Chose:** `cost = length_m * multiplier + penalty_m`. The multiplier (≥ 1) is the product of the factors that apply, and the penalties (≥ 0) are added. A blocked edge costs +Inf. Implemented in `internal/cost`, with table tests per profile.
+
+| Factor | wheelchair | stroller | walk_winter |
+|---|---|---|---|
+| Steps | block | block | ×2.0 + 15 m |
+| Fair surface (compacted, fine_gravel, sett, grass_paver, cobblestone) | ×1.5 | ×1.2 | ×1.2 |
+| Bad surface (gravel, dirt, ground, grass, sand, rock, unpaved, mud, …) | block | ×2.0 | ×1.5 |
+| Surface unknown, not inferable | ×1.3 | ×1.15 | ×1.1 |
+| `smoothness=intermediate` | ×1.2 | ×1.1 | – |
+| `smoothness` bad or worse | block | ×1.5 | – |
+| `wheelchair=no` | block | – | – |
+| Kerb `raised` | block | +30 m | – |
+| Kerb of unknown height (`yes`, `rolled`, other) | +50 m | +10 m | – |
+| Crossing with no kerb data | +30 m | +10 m | – |
+| Road: `sidewalk=separate` / major road without sidewalk / minor road without sidewalk data | ×1.5 / ×3.0 / ×1.3 (all profiles) | | |
+
+**Rejected:** a separate cost formula per profile (harder to compare and test), and blocking every edge with poor or missing data.
+**Why:** a hard block means "this profile physically can't use it" (steps or a raised kerb for a wheelchair). Everything else is a preference, so it gets a soft penalty, and a slightly worse route always beats no route. Multipliers ≥ 1 and penalties ≥ 0 keep cost ≥ length, which keeps the haversine heuristic admissible. `TestCostNeverBelowLength` checks this across every combination of tag values, and `TestAStarMatchesDijkstra` checks the search itself. walk_winter has no hard blocks; it reacts to hazards through the overlay (Day 5).
+**Ignored on purpose:** `incline` is almost always just `up`/`down`, which says nothing on undirected edges. `width` appears on only 280 edges.
+
+## 9. Missing tags are penalized and labelled, not blocked or assumed fine
+**Chose:** a sidewalk, crossing, plaza or road with no `surface` tag is assumed paved (no penalty, label `inferred`). Any other edge with no surface tag gets the profile's "surface unknown" multiplier and the label `unknown`. A crossing with no kerb data gets a penalty and is labelled `unknown`. Surface values the model doesn't recognize count as unknown.
+**Rejected:** blocking unknown edges for wheelchair, and treating unknown as good.
+**Why:** about 30% of pedestrian edges have no surface tag. Blocking them would disconnect large parts of campus. Treating them as good would put false confidence in the route. Inference applies only where local practice makes it safe: Waterloo sidewalks and roads are effectively always paved. The label shows the user which kind of segment they're on.
+
+## 10. Full in-memory graph instead of querying Postgres per route
+**Chose:** load every node and edge at startup into a CSR adjacency index (`internal/graph`), plus one precomputed cost slice per profile.
+**Rejected:** on-demand queries (pgRouting, or recursive SQL per route).
+**Why:** the whole graph is 6.5 MiB of heap and loads in about 110 ms. Searches read only memory: p50 is about 0.49 ms and p99 about 2.7 ms on random cross-bbox queries (see `docs/benchmarks/day2.md`). An immutable in-memory graph is also what makes the copy-on-write hazard overlay possible. The cost is that memory and startup time grow with the region, which is irrelevant at this bbox size.
+
+## 11. A* with a haversine heuristic instead of contraction hierarchies
+**Chose:** plain A* over the cost table.
+**Rejected:** contraction hierarchies (CH) and other preprocessing-based speedups.
+**Why:** CH precomputes shortcuts for fixed edge weights. Live hazards change weights constantly, and each change would trigger expensive re-contraction (or require customizable CH, which is far more complex). A* already runs in about 2–3 ms at p99 on this graph. It expands roughly 1,900–2,100 nodes per query on average. That is well within budget, and per-query cost changes are trivial to apply.
+
+## 12. Snap to the profile's usable network
+**Chose:** before searching, snap each endpoint to the nearest node in the largest connected component of the edges the profile can use.
+**Rejected:** snapping to the nearest node in the full graph.
+**Why:** on a real campus pair (SLC → Hagey Hall), the nearest node sat in a 9-node pocket that only steps lead out of, so wheelchair and stroller searches failed with "no route" even though a step-free route exists. Profile-aware snapping moved the start 3.3 m (from 25.2 m to 28.5 m away) and found a 569 m step-free route. Day 3's edge snapping applies the same rule and reports the snap distance, so the user can see when the nearest usable path is far away.

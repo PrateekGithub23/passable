@@ -1,4 +1,4 @@
-module github.com/USERNAME/passable
+module github.com/PrateekGithub23/passable
 
 go 1.27.3
 

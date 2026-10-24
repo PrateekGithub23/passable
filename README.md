@@ -2,9 +2,9 @@
 
 Accessibility-aware pedestrian routing for the University of Waterloo campus and uptown Waterloo. Passable finds routes for three profiles. `wheelchair` treats steps as impassable and penalizes or blocks bad surfaces and missing or high kerbs. `stroller` blocks steps and applies milder penalties. `walk_winter` applies soft penalties and reacts strongly to hazards. Each segment is labelled `verified`, `inferred` or `unknown`, so the route says how much it trusts the map data. People can report hazards (elevator out, blocked sidewalk, ice); reports decay over time and are confirmed or resolved by votes. A copy-on-write overlay applies the reports to routing without blocking route queries, and anyone whose active route crosses an affected edge is told over WebSocket.
 
-> Status: Day 1 of 10. Data pipeline only: schema, OSM import, coverage check.
+> Status: Day 2 of 10. OSM import, in-memory graph, per-profile cost model, A* routing CLI, first benchmark.
 
-## Running locally (Day 1)
+## Running locally
 
 Requires Docker, Go 1.22+, `curl` and `jq`.
 
@@ -13,9 +13,26 @@ docker compose up -d --wait   # Postgres+PostGIS on localhost:5433, Redis on 637
 scripts/gate.sh               # tag-coverage counts from Overpass
 scripts/fetch_osm.sh          # downloads data/ways.json and data/nodes.json
 go run ./cmd/importer         # loads the graph (flags: -ways, -nodes, -db)
+go run ./cmd/route -from 43.4718,-80.5452 -to 43.4685,-80.5418   # SLC -> Hagey Hall, all profiles
+go run ./cmd/bench            # latency / nodes-expanded benchmark
+go test -race ./...
 ```
 
 If Overpass rate-limits you, set `OVERPASS=https://overpass.kumi.systems/api/interpreter`.
+
+## Routing performance (Day 2)
+
+From `go run ./cmd/bench` on an Apple M4: 2000 random queries per profile, mean straight-line distance about 1.95 km. Times are for one in-process A* search. Full output: [`docs/benchmarks/day2.md`](docs/benchmarks/day2.md).
+
+| Profile | p50 | p95 | p99 | Nodes expanded (mean / p95) |
+|---|---|---|---|---|
+| wheelchair | 493 µs | 1.88 ms | 2.66 ms | 2104 / 6199 |
+| stroller | 489 µs | 1.91 ms | 2.90 ms | 2025 / 5764 |
+| walk_winter | 442 µs | 1.60 ms | 2.43 ms | 1873 / 5244 |
+
+The graph takes 6.5 MiB of heap and loads in about 116 ms. Building each profile's cost table takes about 3 ms.
+
+Routes differ by profile on real campus pairs. For SLC → Hagey Hall, wheelchair and stroller take a 569 m step-free route, while walk_winter takes a 611 m route that includes steps; only 7.6% of the route length is shared.
 
 ## Data coverage
 
