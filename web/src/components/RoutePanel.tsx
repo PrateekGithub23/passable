@@ -20,6 +20,7 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
+import { useEffect, useRef } from "react";
 
 import type { Confidence, Place, Profile, RouteResponse, Waypoint } from "@/lib/api";
 import { BLOCKED_COLOR, CONFIDENCE_COLOR, CONFIDENCE_HELP, CONFIDENCE_LABEL, HAZARD_STYLE, formatDistance, humanizeReason } from "@/lib/style";
@@ -49,7 +50,9 @@ interface Props {
 export default function RoutePanel(props: Props) {
   const { start, end, route, loading, error } = props;
   return (
-    <div className="flex h-full flex-col">
+    // Phones: the whole sheet scrolls, so the route summary isn't squeezed under the search
+    // fields. Desktop: header, search and footer stay put and only the middle scrolls.
+    <div className="flex h-full flex-col overflow-y-auto md:overflow-hidden">
       <header className="flex items-center justify-between px-5 pt-4 pb-3">
         <Link href="/" className="flex items-center gap-2.5 rounded-lg" aria-label="Passable home">
           <LogoMark className="h-8 w-8" />
@@ -102,7 +105,7 @@ export default function RoutePanel(props: Props) {
       </section>
 
       {/* The one thing that matters right now. aria-live announces changes to screen readers. */}
-      <div className="mt-4 flex-1 overflow-y-auto px-5 pb-4" aria-live="polite">
+      <div className="mt-4 flex-1 px-5 pb-4 md:overflow-y-auto" aria-live="polite">
         {error ? (
           <ErrorCard message={error} onRetry={props.onRetry} />
         ) : loading ? (
@@ -225,6 +228,13 @@ function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void 
 const CONFIDENCE_ORDER: Confidence[] = ["verified", "inferred", "unknown"];
 
 function RouteSummary({ route, onClear }: { route: RouteResponse; onClear: () => void }) {
+  // On phones the summary starts below the search fields; bring it into view when a new route
+  // arrives so the answer is visible without scrolling. (Desktop has room for both.)
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (window.matchMedia("(max-width: 767px)").matches) ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [route]);
+
   const total = route.distance_m || 1;
   // Floor, not round: 99.6% must not read as "100%" next to "4 m without details".
   const knownPct = Math.floor((100 * (route.confidence_m.verified + route.confidence_m.inferred)) / total);
@@ -246,7 +256,7 @@ function RouteSummary({ route, onClear }: { route: RouteResponse; onClear: () =>
   for (const n of route.notes) if (!covered.some((c) => n.includes(c))) items.push({ tone: "info", text: n });
 
   return (
-    <section className="animate-slide-up space-y-4" aria-label="Route">
+    <section ref={ref} className="animate-slide-up scroll-mt-3 space-y-4" aria-label="Route">
       <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
