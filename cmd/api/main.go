@@ -34,7 +34,12 @@ func main() {
 	addr := flag.String("addr", ":"+envOr("PORT", "8080"), "listen address")
 	dbURL := flag.String("db", envOr("DATABASE_URL", "postgres://passable:passable@localhost:5433/passable"), "Postgres connection URL")
 	cors := flag.String("cors", envOr("CORS_ORIGINS", "http://localhost:3000"), "comma-separated origins allowed to call the API from a browser")
-	redisURL := flag.String("redis", envOr("REDIS_URL", "redis://localhost:6379/0"), "Redis URL for the route cache (empty disables it)")
+	// REDIS_URL unset -> local Docker Redis; REDIS_URL="" -> Redis explicitly turned off.
+	redisDefault := "redis://localhost:6379/0"
+	if v, ok := os.LookupEnv("REDIS_URL"); ok {
+		redisDefault = v
+	}
+	redisURL := flag.String("redis", redisDefault, "Redis URL (cache, event bus, rate limits); empty disables Redis")
 	expiryEvery := flag.Duration("expiry-interval", envDuration("EXPIRY_INTERVAL", 30*time.Second), "how often to expire hazard reports past their TTL (and check for missed events)")
 	rateLimit := flag.Bool("rate-limit", envOr("RATE_LIMIT", "true") == "true", "enforce rate limits (needs Redis); disable for load tests")
 	ipHeader := flag.String("ip-header", os.Getenv("TRUSTED_IP_HEADER"), "header a trusted proxy sets to the client IP (e.g. Fly-Client-IP); empty = TCP peer")
@@ -81,15 +86,13 @@ func main() {
 	var routeCache *cache.RouteCache
 	var bus *live.Bus
 	var limiter *ratelimit.Limiter
-	if *redisURL != "" {
-		opts, err := redis.ParseURL(*redisURL)
+	if *redisURL == "" {
+		log.Printf("redis disabled (REDIS_URL is empty): no route cache, no cross-instance event bus, no rate limits; run a single instance")
+	} else {
+		opts, err := redisOptions(*redisURL)
 		if err != nil {
 			log.Fatalf("redis url: %v", err)
 		}
-		// Without this, go-redis ignores context deadlines and falls back to its own
-		// multi-second timeouts and retries; the cache's 50 ms and the publish's 500 ms
-		// budgets would have no effect.
-		opts.ContextTimeoutEnabled = true
 		rdb := redis.NewClient(opts)
 		if err := rdb.Ping(ctx).Err(); err != nil {
 			log.Printf("redis unavailable (%v); running without route cache or event bus", err)
@@ -169,6 +172,21 @@ func main() {
 	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+// redisOptions turns REDIS_URL into client options. Works for local Docker Redis
+// ("redis://localhost:6379/0") and for hosted providers, which usually require TLS
+// ("rediss://default:<password>@<host>:6379": the extra "s" turns TLS on).
+func redisOptions(url string) (*redis.Options, error) {
+	opts, err := redis.ParseURL(url)
+	if err != nil {
+		return nil, err
+	}
+	// Without this, go-redis ignores context deadlines and falls back to its own
+	// multi-second timeouts and retries; the cache's 50 ms and the publish's 500 ms
+	// budgets would have no effect.
+	opts.ContextTimeoutEnabled = true
+	return opts, nil
 }
 
 func envDuration(key string, def time.Duration) time.Duration {
