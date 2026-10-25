@@ -103,7 +103,9 @@ export default function Planner() {
 
   const pick = (which: "start" | "end") => (place: Place) => {
     clearAffected();
-    const wp = { point: place.point, label: place.name };
+    // Lead with the building code when there is one: "DC · William G. Davis Computer Research
+    // Centre" stays recognisable even when the field truncates the long name.
+    const wp = { point: place.point, label: place.ref ? `${place.ref} · ${place.name}` : place.name };
     if (which === "start") setStart(wp);
     else setEnd(wp);
     // Show where it is, unless the route (which fits itself into view) is about to appear.
