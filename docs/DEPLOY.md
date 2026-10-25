@@ -11,6 +11,36 @@ Production layout:
 
 Secrets (`DATABASE_URL`, `REDIS_URL`, `FLY_API_TOKEN`) are never committed. Locally they live in `.env` (git-ignored), and in production in Fly secrets and GitHub Actions secrets.
 
+## How continuous deployment works
+
+```
+git push origin main
+   ├─► GitHub Actions (.github/workflows/ci.yml)
+   │     ├─ "Go tests"        gofmt · vet · race tests · integration tests (Postgres+Redis in Docker)
+   │     ├─ "Frontend checks" lint · typecheck · build
+   │     └─ "Deploy API"      only if both pass: flyctl deploy --remote-only (secrets.FLY_API_TOKEN)
+   │            1. Fly builds the Docker image on its remote builder
+   │            2. release_command /app/migrate runs against Neon; a failed migration stops the deploy
+   │            3. the API machine restarts on the new image and loads the graph (~1.5 s)
+   │            4. the /healthz check must pass
+   └─► Vercel (GitHub integration): builds web/ and switches the production URL over in one step
+```
+
+- **Brief restart:** there's one API machine, so an API deploy restarts it for a few seconds. Open maps reconnect their WebSocket automatically.
+- **Vercel doesn't wait for CI.** A failing test blocks the API deploy but not the site deploy.
+- **Pull requests** get Vercel preview URLs. Previews can't call the API, because their origins aren't in `CORS_ORIGINS`.
+- **Rollback:** API with `fly releases` and `fly deploy --image <previous image>`. Site with "Instant Rollback" in the Vercel dashboard.
+- **Every push to `main` deploys,** including documentation-only changes.
+
+### Rotating the Fly deploy token (every 90 days, or immediately if it leaks)
+The token never appears on screen: `fly` writes it straight into `gh`, which stores it encrypted in GitHub.
+```sh
+fly tokens create deploy -a passable-api -n github-actions -x 2160h | gh secret set FLY_API_TOKEN -R PrateekGithub23/passable
+fly tokens list -a passable-api          # metadata only: find the OLD token's ID
+fly tokens revoke <old-token-id>
+gh secret list -R PrateekGithub23/passable   # shows FLY_API_TOKEN with the new update time
+```
+
 ## One-time setup
 
 ### 1. Accounts and CLIs

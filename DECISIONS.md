@@ -1,5 +1,15 @@
 # Design decisions
 
+Each entry: what was chosen, what was rejected, and why. Grouped by theme:
+
+| Theme | Entries |
+|---|---|
+| Data and import | [1](#1-region-uw-campus--uptown-waterloo) region · [2](#2-overpass-api--custom-go-importer-instead-of-osm2pgsql) importer · [3](#3-geometry-4326-instead-of-geography) geometry · [4](#4-undirected-edges) undirected edges · [5](#5-kerb-values-come-from-any-node-in-the-stretch-not-only-the-edges-endpoints) kerbs · [6](#6-is_crossing-comes-from-way-tags-only) crossings · [7](#7-local-environment-postgres-on-host-port-5433-postgis-image-under-amd64) local env |
+| Routing | [8](#8-cost-model-length-multipliers-plus-fixed-penalties-with-hard-blocks-only-where-a-profile-truly-cannot-pass) cost model · [9](#9-missing-tags-are-penalized-and-labelled-not-blocked-or-assumed-fine) missing data · [10](#10-full-in-memory-graph-instead-of-querying-postgres-per-route) in-memory graph · [11](#11-a-with-a-haversine-heuristic-instead-of-contraction-hierarchies) A* vs CH · [12](#12-snap-to-the-profiles-usable-network) / [13](#13-snapping-postgis-knn-for-candidates-exact-projection-in-go-routes-start-mid-edge) / [28](#28-snapping-looks-wider-when-the-nearest-edges-are-a-disconnected-cluster) snapping · [14](#14-no-accessible-route-returns-the-route-with-the-fewest-barriers-and-names-them) barriers · [15](#15-place-search-osm-named-features--pg_trgm-with-uw-building-codes) place search |
+| Live hazards (core problem) | [19](#19-hazard-overlay-copy-on-write-snapshots-versioned-by-a-global-event-sequence) copy-on-write overlay · [20](#20-hazard-effects-and-lifecycle) effects and lifecycle · [21](#21-route-cache-in-redis-keyed-by-graph-version-fails-open) versioned cache · [23](#23-live-updates-websocket-hub-with-an-edge---subscribers-inverted-index) WebSocket hub · [24](#24-cross-instance-fan-out-over-redis-pubsub-with-postgres-as-the-safety-net) pub/sub fan-out |
+| Product and safety | [16](#16-frontend-maplibre-loaded-only-in-the-browser-openfreemap-basemap-state-owned-by-one-component) frontend · [17](#17-cors-echo-allowlisted-origins-instead-of-) CORS · [22](#22-anonymous-sessions-via-a-server-issued-id-in-a-header) sessions · [25](#25-rate-limiting-redis-token-buckets-per-session-and-per-ip-fail-open) rate limits · [26](#26-demo-simulator-clearly-labelled) simulator · [27](#27-report-flow-designed-for-first-time-users) report flow |
+| Engineering | [18](#18-migrations-with-goose-embedded-in-the-binary) migrations · [29](#29-test-strategy-fast-tests-by-default-real-infrastructure-behind-a-build-tag) testing · [30](#30-deployment-on-free-tiers-with-no-payment-method) deployment |
+
 Each entry: what was chosen, what was rejected, and why.
 
 ## 1. Region: UW campus + uptown Waterloo

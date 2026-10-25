@@ -1,168 +1,152 @@
 # Passable
 
-Accessibility-aware pedestrian routing for the University of Waterloo campus and uptown Waterloo. Passable finds routes for three profiles. `wheelchair` treats steps as impassable and penalizes or blocks bad surfaces and missing or high kerbs. `stroller` blocks steps and applies milder penalties. `walk_winter` applies soft penalties and reacts strongly to hazards. Each segment is labelled `verified`, `inferred` or `unknown`, so the route says how much it trusts the map data. People can report hazards (elevator out, blocked sidewalk, ice); reports decay over time and are confirmed or resolved by votes. A copy-on-write overlay applies the reports to routing without blocking route queries, and anyone whose active route crosses an affected edge is told over WebSocket.
+**Accessible walking routes for the University of Waterloo campus and uptown Waterloo, kept up to date by the people using them.**
 
-> Status: Day 9 of 10, deployed. **Live: https://passable-alpha.vercel.app** (API: https://passable-api.fly.dev, [status page](https://passable-alpha.vercel.app/status)).
+Passable plans routes for three profiles:
+- **wheelchair** never uses steps, raised kerbs or rough surfaces;
+- **stroller** never uses steps and avoids rough ground;
+- **winter walk** avoids steps and unpaved paths, and reacts most strongly to ice.
 
-## Production
+Every route says how much it trusts the map data (verified, inferred or unknown). Anyone can report a hazard, such as an elevator that's out, a blocked sidewalk, construction or ice. Reports change everyone's routes within seconds. Only the people whose route is affected get a "reroute?" prompt. Reports are confirmed or resolved by votes and expire on their own.
 
-| Piece | Where |
+**Live:** https://passable-alpha.vercel.app · [status](https://passable-alpha.vercel.app/status) · [about & limitations](https://passable-alpha.vercel.app/about) · API: https://passable-api.fly.dev
+
+![A wheelchair route across campus; a blocked sidewalk just reported by another user sits on it (red dot) and the "reroute?" prompt is showing](docs/img/live-reroute.jpg)
+
+## Run it locally (about 10 minutes)
+
+You need **Docker**, **Go 1.27+**, **Node 20.9+**, plus `curl` and `jq`.
+
+```sh
+git clone https://github.com/PrateekGithub23/passable && cd passable
+docker compose up -d --wait      # Postgres+PostGIS on :5433, Redis on :6379
+go run ./cmd/migrate             # create the schema
+scripts/fetch_osm.sh             # download campus paths from OpenStreetMap (~1 min)
+go run ./cmd/importer            # build the routing graph: 21,173 path segments
+go run ./cmd/api                 # API on http://localhost:8080 (leave running)
+```
+In a second terminal:
+```sh
+cd web && npm install && npm run dev    # http://localhost:3000
+```
+
+Then, on the map:
+1. **Get a route:** click a start point, then a destination, and switch profiles to compare. Line colours show confidence: dark blue is verified, light blue inferred, dashed amber unknown.
+2. **Report a problem:** press **Report a problem**, tap the spot, choose what it is, and send.
+3. **See live updates:** open a second browser window with a route over that spot. It gets the reroute prompt.
+4. **Without real reports:** `go run ./cmd/simulator` files clearly labelled demo hazards and cleans up when you press Ctrl-C.
+
+If OpenStreetMap's Overpass API rate-limits the download, wait a minute, or run `OVERPASS=https://overpass.kumi.systems/api/interpreter scripts/fetch_osm.sh`.
+
+## How it works
+
+```mermaid
+flowchart LR
+    B["Browser<br/>Next.js + MapLibre"] -->|"REST: route, report, vote"| API
+    API -.->|"WebSocket: hazards, reroute prompts"| B
+    subgraph API["Go API"]
+        direction TB
+        R["A* router"] --> S["one snapshot per query<br/>(atomic.Pointer)"]
+        S --> G["immutable graph<br/>+ per-profile costs"]
+        S --> O["copy-on-write<br/>hazard overlay"]
+    end
+    API -->|"snapping, reports, event log"| PG[("PostgreSQL + PostGIS")]
+    API <-->|"route cache, pub/sub, rate limits"| RD[("Redis")]
+```
+
+1. **Import.** OpenStreetMap paths are split into a graph at every junction, keeping the accessibility tags: surface, steps, kerbs, crossings.
+2. **Cost model.** Each profile turns those tags into a cost: `length × multiplier + penalty`, or *blocked*. Missing data is penalized and labelled, never silently assumed fine.
+3. **Routing.** A* with a straight-line-distance heuristic runs over the whole graph in memory, so a search takes about 0.5 ms. Routes start and end partway along a path, at the point nearest where you clicked.
+4. **Hazards without locks** (the core engineering problem). Reports change edge costs while searches are running. The graph never changes. Live hazards sit in a small **immutable snapshot** behind an atomic pointer. Each query reads the pointer once, so it sees one consistent state. A new report builds a new snapshot and swaps it in, so searches never wait. Every change gets a global sequence number from the Postgres event log. That number is the graph version, and it's part of the route cache key, so stale routes are never served.
+5. **Live updates.** Changes travel between API instances over Redis pub/sub. An index from each path segment to the users routing over it means only affected users are prompted. If a message is lost, the instance reloads from Postgres, the source of truth.
+
+More detail: [architecture and request flows](docs/ARCHITECTURE.md) · [every design decision and what was rejected](DECISIONS.md) · [API reference](docs/API.md).
+
+## Results
+
+All numbers come from real runs; details in [`docs/benchmarks/`](docs/benchmarks).
+
+| What | Result | Source |
+|---|---|---|
+| One route search (A*, wheelchair, 2000 random campus queries) | p50 **0.50 ms**, p99 **2.7 ms**, ~2,100 nodes expanded | `cmd/bench`, Day 8 |
+| HTTP load, 1,000 route requests/s with hazards changing every second | **0 failures** in 30k requests, p95 **5.6 ms**, p99 12.3 ms | k6, [day8.md](docs/benchmarks/day8.md) |
+| Route cache (stable graph version) | 40% hit rate; hit p95 **1.0 ms** against 5.0 ms for a miss | k6, day 8 |
+| Report → WebSocket client, across two API instances | p50 **6.3 ms**, p95 8.4 ms, including the database write | `cmd/wsprobe`, [day6](docs/benchmarks/day6-propagation.md) |
+| Concurrency: routes vs. hazard writes | **27,055 routes** during **141,586 snapshot swaps**, all consistent, race detector clean | overlay stress test |
+| **Production:** route not in the cache, server time | **11.6 ms** average (mostly the two database queries between Fly and Neon) | `/metrics` on Fly |
+| **Production:** report in one browser → prompt in another | **470 ms** end to end, both over the internet | two-browser test on the live site |
+
+## Data coverage and limitations
+
+OpenStreetMap data for the bbox `43.455,-80.565,43.485,-80.505`, fetched 2026-10-24.
+
+| Data | Coverage |
 |---|---|
-| Frontend | Vercel: https://passable-alpha.vercel.app |
-| API (Go) | Fly.io, one machine in `iad`: https://passable-api.fly.dev (`/healthz`, `/metrics`) |
-| Postgres + PostGIS | Neon, us-east-1 |
-| Redis | Upstash free tier, us-east-1 (TLS) |
+| Graph | 15,468 nodes, 21,173 edges, 703 km of paths and streets |
+| Surface tagged (footways and paths) | **70%** of edges; the rest are labelled `inferred` (sidewalks, roads) or `unknown` |
+| Steps / crossings / kerbs | 237 steps edges, 2,167 crossing edges (1,177 with kerb data), 1,277 kerb nodes |
+| Smoothness / incline / `wheelchair` tags | 1.3% / 0.1% / 0.1% of footway, path and pedestrian edges |
 
-All of it runs on free tiers with no payment method. Setup steps are in [`docs/DEPLOY.md`](docs/DEPLOY.md).
+What that means:
+- **No slope data.** Elevation is out of scope and `incline` is almost never tagged, so a steep path can be suggested to a wheelchair user.
+- **Indoor routes are mostly missing.** Only 8 elevators are mapped, and indoor corridors are usually disconnected from outdoor paths.
+- **Crossings are detected only where they're mapped as their own path.**
+- **Reports are unverified until confirmed by other people.**
 
-Measured on the deployed system (2026-10-25):
-- **Routing:** route requests not in the cache average 11.6 ms on the server over 11 distinct routes. Most of that is the two snapping queries between Fly and Neon; the A* search itself takes ~0.2 ms. Repeat requests are served from the Redis cache.
-- **Live updates, server side:** a hazard reaches WebSocket clients 2.2 ms (p50) after it is committed, through Upstash pub/sub.
-- **Live updates, in the browser:** in a two-browser test on the live site, a report filed through the UI in one browser showed the "reroute?" prompt in the other 470 ms after Send was pressed. That includes both browsers' internet round trips to Virginia.
+Full numbers are in [Data coverage details](#data-coverage-details) below.
 
-## Running locally
-
-Requires Docker, Go 1.22+, `curl` and `jq`.
+## Testing
 
 ```sh
-docker compose up -d --wait   # Postgres+PostGIS on localhost:5433, Redis on 6379
-go run ./cmd/migrate          # apply database migrations (goose)
-scripts/gate.sh               # tag-coverage counts from Overpass
-scripts/fetch_osm.sh          # downloads data/ways.json and data/nodes.json
-go run ./cmd/importer         # loads the graph (flags: -ways, -nodes, -db)
-go run ./cmd/route -from 43.4718,-80.5452 -to 43.4685,-80.5418   # SLC -> Hagey Hall, all profiles
-go run ./cmd/bench            # latency / nodes-expanded benchmark
-go run ./cmd/api              # HTTP API on :8080 (flags -addr, -db, -cors; or PORT / DATABASE_URL / CORS_ORIGINS)
-go test -race ./...                                   # unit, property and golden tests (no Docker needed)
-go test -tags integration -race ./integration          # real Postgres+Redis via testcontainers
-k6 run -e RATE=200 scripts/k6/load.js                 # load test (start the API with -rate-limit=false)
-
-cd web && npm install && npm run dev   # map UI on http://localhost:3000
+go test -race ./...                              # unit, property and golden tests; no Docker needed
+go test -tags integration -race ./integration     # real PostGIS + Redis via testcontainers, 2 API instances
+cd web && npm run lint && npm run typecheck       # frontend
+k6 run -e RATE=200 scripts/k6/load.js            # load test (API started with -rate-limit=false)
 ```
+- **Property tests:** A* returns exactly Dijkstra's cost on random graphs and on 450 real campus queries. The cost model never drops below edge length, which keeps A* exact.
+- **Golden routes:** 3 campus trips × 3 profiles, pinned to recorded results, using a committed snapshot of the real graph (`testdata/`).
+- **Concurrency:** a race-detector stress test of routing during constant hazard writes; the hub's targeting; the rate limiter's atomicity.
+- **Integration:** the full hazard lifecycle across two API instances on real Postgres and Redis (WebSocket delivery, cache key change, votes, expiry, gap → resync), plus a regression test for a snapping bug the load test found.
+- **CI** runs all of it on every push, and a push to `main` that passes deploys the API to Fly.io. The site deploys from the same push through Vercel ([how deployment works](docs/DEPLOY.md#how-continuous-deployment-works)).
 
-In the UI, click once for the start and again for the destination, then switch profiles to compare routes. "Report a problem" files a hazard: tap the spot, choose what it is, send. Tap any hazard marker to say "Still there" or "It's gone".
+## Repository map
 
-To see live features without real reports, run the demo simulator. Its hazards are labelled "Demo", and it cleans up after itself when you press Ctrl-C:
+| Path | What's there |
+|---|---|
+| `cmd/api` | The HTTP + WebSocket server |
+| `cmd/importer`, `scripts/fetch_osm.sh`, `scripts/gate.sh` | OpenStreetMap download, coverage check, graph import |
+| `cmd/migrate`, `db/migrations` | Schema migrations (goose, embedded in the binary) |
+| `cmd/route`, `cmd/bench`, `cmd/wsprobe`, `cmd/simulator`, `cmd/exportgraph` | CLI routing, benchmarks, propagation probe, demo simulator, test-fixture export |
+| `internal/graph`, `internal/cost`, `internal/route` | Graph, per-profile cost model, A* |
+| `internal/hazard`, `internal/overlay`, `internal/reports` | Hazard rules, copy-on-write overlay, persistence and lifecycle |
+| `internal/live`, `internal/cache`, `internal/ratelimit`, `internal/metrics` | WebSocket hub + Redis bus, route cache, rate limiting, Prometheus |
+| `internal/api` | Handlers, snapping, explanations, CORS, stats |
+| `web/` | Next.js frontend (`/`, `/about`, `/status`) |
+| `integration/`, `testdata/`, `scripts/k6/` | Integration tests, graph fixture, load test |
+| `docs/` | Architecture, API, deployment, benchmarks, demo script |
 
-```sh
-go run ./cmd/simulator -every 45s -max 6
-``` Line colours show confidence: dark blue is verified, light blue is inferred, and dashed amber is unknown. Red marks barriers. A dotted grey line joins each clicked point to where the route actually starts on the network.
-
-If Overpass rate-limits you, set `OVERPASS=https://overpass.kumi.systems/api/interpreter`.
-
-## API
-
-```sh
-curl 'localhost:8080/api/v1/route?from=43.4718,-80.5452&to=43.4685,-80.5418&profile=wheelchair'
-curl 'localhost:8080/api/v1/places?q=dc'
-curl localhost:8080/healthz
-```
-
-`/route` takes `from` and `to` as `lat,lng` inside the bbox, plus `profile` (`wheelchair`, `stroller` or `walk_winter`). The response includes:
-- `accessible`, `distance_m`, `cost`, `nodes_expanded` and `search_ms`;
-- `snap`: the edge each point snapped to, and how far away it was;
-- `confidence_m`: meters labelled verified, inferred and unknown;
-- `notes`: plain-language warnings;
-- `segments`: consecutive edges with the same description, name, surface, kerb, confidence and penalties, merged, each with `[lon, lat]` coordinates.
-
-When no fully accessible route exists, the response has `accessible: false` and a `barriers` list naming what blocks the profile.
-
-### Hazard reports
-
-```sh
-SID=$(curl -s -X POST localhost:8080/api/v1/session | jq -r .session_id)
-curl -X POST localhost:8080/api/v1/hazards -H "X-Session-ID: $SID" -H 'Content-Type: application/json' \
-     -d '{"lat":43.47087,"lng":-80.54274,"type":"blocked_sidewalk","note":"fenced off"}'
-curl -X POST localhost:8080/api/v1/hazards/1/confirm -H "X-Session-ID: $SID"    # or /resolve
-curl 'localhost:8080/api/v1/hazards?bbox=-80.565,43.455,-80.505,43.485'
-curl localhost:8080/api/v1/graph/version
-```
-
-Writes are rate-limited per session and per IP (Redis token buckets; a session can file 5 reports at once, then 20/hour). Over the limit, the API returns `429` with `Retry-After`. See `DECISIONS.md` #25 for every limit.
-
-Hazard types are `elevator_out`, `blocked_sidewalk`, `construction`, `ice_snow` and `missing_curb_ramp`. A new report changes routes from the very next request:
-- the response's `graph_version` increases;
-- the route cache key changes;
-- affected segments list the report under `hazards`;
-- if a hazard leaves no way through, it appears as a named barrier.
-
-Reports move from `active` to `confirmed` (2 confirmations), then to `resolved` (2 resolve votes, or the reporter) or `expired` (per-type TTL, extended by each confirmation).
-
-### Live updates (`GET /ws`)
-
-The map subscribes to its visible area and to the edges of the route on screen. Hazard changes arrive as `hazard.created|updated|expired`. A new hazard on the route's edges that matters for the chosen profile sends `route.affected`, and the UI asks "reroute?". With several API instances, events travel between them over Redis pub/sub, and Postgres stays the source of truth if a message is lost.
-
-Measured from a hazard POST to the WebSocket event: p50 6.3 ms and p95 8.4 ms, including the cross-instance trip. In the browser, the toast appeared 40 ms after the report was sent ([`docs/benchmarks/day6-propagation.md`](docs/benchmarks/day6-propagation.md); `go run ./cmd/wsprobe` reproduces it).
-
-`/places?q=` matches UW building codes exactly (`dc`, `slc`, `e7`), matches word prefixes (`dav`), and tolerates typos (`dana portr`).
-
-## Load test (Day 8)
-
-From k6 on an Apple M4, with one API process. Full results are in [`docs/benchmarks/day8.md`](docs/benchmarks/day8.md).
-
-| Scenario | Requests | Failed | p50 | p95 | p99 | Cache hits |
-|---|---|---|---|---|---|---|
-| 200 req/s + a hazard change every second | 12,000 | 0 | 2.78 ms | 4.24 ms | 5.32 ms | 0.9% |
-| 200 req/s, no hazard writes | 12,001 | 0 | | | | 39.6% (hit p95 1.0 ms vs miss 5.0 ms) |
-| 1,000 req/s + hazard changes | 29,996 | 0 | 3.44 ms | 5.62 ms | 12.3 ms | 4.6% |
-
-During the 200 req/s run, a hazard reached a WebSocket client p95 5.5 ms after its POST was sent. Hazard changes invalidate the cache by design: each change moves requests to new keys, so stale routes are never served.
-
-## Routing performance
-
-Day 5 numbers, with the hazard overlay on the hot path: wheelchair p50 521 µs and p99 2.81 ms with 0 live hazards; 569 µs and 3.03 ms with 50 ([`docs/benchmarks/day5.md`](docs/benchmarks/day5.md)). Day 2 baseline before the overlay:
-
-From `go run ./cmd/bench` on an Apple M4: 2000 random queries per profile, mean straight-line distance about 1.95 km. Times are for one in-process A* search. Full output: [`docs/benchmarks/day2.md`](docs/benchmarks/day2.md).
-
-| Profile | p50 | p95 | p99 | Nodes expanded (mean / p95) |
-|---|---|---|---|---|
-| wheelchair | 493 µs | 1.88 ms | 2.66 ms | 2104 / 6199 |
-| stroller | 489 µs | 1.91 ms | 2.90 ms | 2025 / 5764 |
-| walk_winter | 442 µs | 1.60 ms | 2.43 ms | 1873 / 5244 |
-
-The graph takes 6.5 MiB of heap and loads in about 116 ms. Building each profile's cost table takes about 3 ms.
-
-Routes differ by profile on real campus pairs. For SLC → Hagey Hall, wheelchair and stroller take a 569 m step-free route, while walk_winter takes a 611 m route that includes steps; only 7.6% of the route length is shared.
-
-## Data coverage
-
-Source: OpenStreetMap via Overpass, fetched 2026-10-24, bbox `43.455,-80.565,43.485,-80.505`.
+## Data coverage details
 
 **OSM tag counts** (`scripts/gate.sh`; "ped ways" = `highway` footway/path/pedestrian)
 
 | Metric | Count |
 |---|---|
-| Ped ways | 5239 |
-| … with `surface` | 3475 (66.3%) |
-| … with `smoothness` | 73 (1.4%) |
-| … with `incline` | 11 (0.2%) |
-| … with `wheelchair` | 6 (0.1%) |
-| `footway=sidewalk` ways | 1658 |
-| `footway=crossing` ways | 1074 |
-| `highway=crossing` nodes | 1684 |
-| `highway=steps` ways | 246 |
-| Nodes with `kerb` | 1277 |
-| Elevator nodes | 8 |
+| Ped ways | 5,239 |
+| … with `surface` | 3,475 (66.3%) |
+| … with `smoothness` / `incline` / `wheelchair` | 73 (1.4%) / 11 (0.2%) / 6 (0.1%) |
+| `footway=sidewalk` ways / `footway=crossing` ways | 1,658 / 1,074 |
+| `highway=crossing` nodes / `highway=steps` ways | 1,684 / 246 |
+| Nodes with `kerb` / elevator nodes | 1,277 / 8 |
 
 **Imported graph** (`cmd/importer` + verification SQL)
 
 | Metric | Value |
 |---|---|
-| Ways → edges | 9013 → 21,173 (36 degenerate stretches skipped) |
-| Graph nodes | 15,468 |
+| Ways → edges | 9,013 → 21,173 (36 degenerate stretches skipped) |
 | Total length | 703.1 km (footway 313.1 km, service 153.8, residential 95.4) |
-| Ped edges | 11,159 |
-| … surface coverage | 70.3% of edges, 68.7% of length |
-| … smoothness / incline / wheelchair | 1.3% / 0.1% / 0.1% |
-| Steps edges | 237 |
-| Crossing edges | 2167 (1177 with kerb info) |
-| Edges with kerb info | 2459 (`lowered` 2251, `flush` 179, `raised` 19) |
-| Edges with width | 280 |
+| Footway/path/pedestrian edges | 11,159; surface on 70.3% of edges, 68.7% of length |
+| Edges with kerb info | 2,459 (`lowered` 2,251, `flush` 179, `raised` 19) |
 | Nearest-edge check (Dana Porter Library) | 5 nearest edges at 14.5–19.0 m |
 
-**What this means**
-- **Steps, crossings, kerbs and surface are well mapped,** so the profiles rely on them.
-- **Slope is not modelled.** Fewer than 1% of edges have an `incline` tag, and elevation data is out of scope, so the wheelchair profile cannot avoid steep paths.
-- **About 30% of pedestrian edges have no surface tag.** Their segments are labelled `unknown`, not assumed to be fine.
-- **Indoor routes are largely missing.** Only 8 elevators are mapped, and most building interiors aren't in the graph.
-- **Crossings are detected from way tags only.** Where sidewalks aren't mapped separately, a crossing along a road edge isn't flagged (see `DECISIONS.md` #6).
+---
+Map data © OpenStreetMap contributors (ODbL). Basemap by OpenFreeMap. Built as a 10-day solo project.
