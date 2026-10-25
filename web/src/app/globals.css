@@ -1,12 +1,78 @@
 @import "tailwindcss";
 
-/* Light theme only for now: the basemap style is light, and the panel uses explicit greys. */
+/*
+ * Passable design tokens.
+ *
+ * - Brand: deep teal. Reads as "go / safe", has strong contrast on white (teal-700 is 5.4:1),
+ *   and stays distinct from the map's greens and the hazard colours.
+ * - Neutrals: warm stone greys rather than cool slate, for a calmer, less "dashboard" feel.
+ * - Amber is reserved for caution and reporting; red only for barriers and errors.
+ * - Type: Atkinson Hyperlegible Next, designed by the Braille Institute for low-vision readers.
+ * Light theme only: the basemap style is light.
+ */
 @theme inline {
-  --font-sans: var(--font-geist-sans);
+  --font-sans: var(--font-atkinson), ui-sans-serif, system-ui, sans-serif;
+
+  --color-brand-50: #f0fdfa;
+  --color-brand-100: #ccfbf1;
+  --color-brand-500: #14b8a6;
+  --color-brand-600: #0d9488;
+  --color-brand-700: #0f766e;
+  --color-brand-800: #115e59;
+  --color-brand-900: #134e4a;
+
+  --animate-fade-in: fade-in 160ms ease-out;
+  --animate-slide-up: slide-up 200ms ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
-  background: #ffffff;
-  color: #171717;
-  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  background: #fafaf9; /* stone-50 */
+  color: #1c1917; /* stone-900 */
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01";
+}
+
+/* One visible, consistent focus ring for keyboard users everywhere. */
+:focus-visible {
+  outline: 2px solid var(--color-brand-600);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Respect "reduce motion": no animations or smooth transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* MapLibre popups: match the app's cards instead of the default grey box. */
+.maplibregl-popup-content {
+  padding: 0 !important;
+  border-radius: 14px !important;
+  box-shadow: 0 8px 24px rgb(28 25 23 / 0.16) !important;
+  font-family: var(--font-sans);
+}
+.maplibregl-popup-close-button {
+  font-size: 18px;
+  padding: 2px 8px;
+  color: #78716c;
+}
+.maplibregl-ctrl-group {
+  border-radius: 10px !important;
+  box-shadow: 0 1px 3px rgb(28 25 23 / 0.15) !important;
 }

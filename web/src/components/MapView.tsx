@@ -1,19 +1,22 @@
 "use client";
 
 // MapView: the MapLibre map. It draws the start/end markers, the route and live hazard
-// markers, and reports clicks and the visible area to the parent (Planner), which owns all state. MapView itself holds no app state;
-// it only mirrors the props it gets onto the imperative MapLibre API.
+// markers, and reports clicks and the visible area to the parent (Planner), which owns all
+// state. MapView itself holds no app state; it only mirrors its props onto the imperative
+// MapLibre API.
 //
 // Why MapLibre is loaded with a dynamic import inside useEffect: MapLibre touches `window`
 // and WebGL as soon as it runs, and Next.js prerenders components on the server where neither
 // exists. Importing it inside the effect means it only ever loads in the browser.
 
 import { useEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import type { GeoJSONSource, Map as MapLibreMap, Marker, Popup } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import type { BBox, Hazard, LngLat, RouteResponse } from "@/lib/api";
 import { BLOCKED_COLOR, CONFIDENCE_COLOR, HAZARD_STYLE } from "@/lib/style";
+import HazardPopup from "./HazardPopup";
 
 // Free OpenStreetMap vector basemap; no API key needed (https://openfreemap.org).
 const BASEMAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
@@ -34,13 +37,15 @@ interface Props {
   reporting: boolean;
   /** Where the user tapped in report mode; shown as a marker while the form is open. */
   reportPoint?: LngLat;
+  /** Pan here (e.g. a place picked from search); a new nonce pans again to the same place. */
+  focus?: { point: LngLat; nonce: number };
   onMapClick: (point: LngLat) => void;
   onViewportChange: (bbox: BBox) => void;
   /** Vote from a hazard popup; resolves with the updated report. */
   onVote: (id: number, kind: "confirm" | "resolve") => Promise<Hazard>;
 }
 
-export default function MapView({ start, end, route, hazards, reporting, reportPoint, onMapClick, onViewportChange, onVote }: Props) {
+export default function MapView({ start, end, route, hazards, reporting, reportPoint, focus, onMapClick, onViewportChange, onVote }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<{ start?: Marker; end?: Marker; report?: Marker }>({});
@@ -97,8 +102,13 @@ export default function MapView({ start, end, route, hazards, reporting, reportP
         const hit = !reportingRef.current && map.getLayer("hazards") ? map.queryRenderedFeatures(e.point, { layers: ["hazards"] }) : [];
         const h = hit.length > 0 ? hazardsByIdRef.current.get(hit[0].properties.id) : undefined;
         if (h && popupClassRef.current) {
-          const vote = (kind: "confirm" | "resolve") => onVoteRef.current(h.id, kind);
-          new popupClassRef.current({ offset: 10 }).setLngLat(h.point).setDOMContent(hazardPopup(h, vote)).addTo(map);
+          // Render the React card into a detached element and hand that to MapLibre; unmount
+          // it when the popup closes so nothing leaks.
+          const el = document.createElement("div");
+          const root = createRoot(el);
+          root.render(<HazardPopup hazard={h} onVote={(kind) => onVoteRef.current(h.id, kind)} />);
+          const popup = new popupClassRef.current({ offset: 12, maxWidth: "none" }).setLngLat(h.point).setDOMContent(el).addTo(map);
+          popup.on("close", () => setTimeout(() => root.unmount())); // deferred: not during a render
           return;
         }
         onClickRef.current([e.lngLat.lng, e.lngLat.lat]);
@@ -146,7 +156,8 @@ export default function MapView({ start, end, route, hazards, reporting, reportP
         continue;
       }
       if (!marker) {
-        marker = new MarkerClass({ color: which === "start" ? "#16a34a" : "#111827" });
+        // Same symbols as the From/To fields: a ring for the start, a filled pin for the end.
+        marker = new MarkerClass({ element: markerElement(which), anchor: which === "start" ? "center" : "bottom" });
         markersRef.current[which] = marker;
       }
       marker.setLngLat(pos).addTo(map);
@@ -228,7 +239,7 @@ export default function MapView({ start, end, route, hazards, reporting, reportP
     if (!ready || !map || !MarkerClass) return;
     map.getCanvas().style.cursor = reporting ? "crosshair" : "";
     if (reportPoint) {
-      markersRef.current.report ??= new MarkerClass({ color: "#ea580c" });
+      markersRef.current.report ??= new MarkerClass({ element: markerElement("report"), anchor: "bottom" });
       markersRef.current.report.setLngLat(reportPoint).addTo(map);
       // The report form opens over the lower part of the screen. Pan so the tapped spot sits
       // ~80 px below the top of the map, where the form can't cover it and the user can still
@@ -242,7 +253,14 @@ export default function MapView({ start, end, route, hazards, reporting, reportP
     }
   }, [ready, reporting, reportPoint]);
 
-  // 6) Live hazards -> circle markers, coloured by type; confirmed reports drawn larger.
+  // 6) A place was picked from search: bring it into view (zooming in if the map is far out).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map || !focus) return;
+    map.easeTo({ center: focus.point, zoom: Math.max(map.getZoom(), 16), duration: 600 });
+  }, [ready, focus]);
+
+  // 7) Live hazards -> circle markers, coloured by type; confirmed reports drawn larger.
   useEffect(() => {
     const map = mapRef.current;
     hazardsByIdRef.current = new Map(hazards.map((h) => [h.id, h]));
@@ -257,53 +275,20 @@ export default function MapView({ start, end, route, hazards, reporting, reportP
     });
   }, [ready, hazards]);
 
-  return <div ref={containerRef} className="h-full w-full" aria-label="Map. Click to set start and destination." />;
+  return <div ref={containerRef} className="h-full w-full" role="application" aria-label="Map. Tap to set a start or destination, or tap a hazard for details." />;
 }
 
-// hazardPopup builds the popup content with DOM nodes and textContent rather than an HTML
-// string: the note is user-written text, and textContent can never be interpreted as HTML
-// (no script injection through a hazard note).
-//
-// The two buttons let anyone passing by keep reports accurate: "Still there" confirms (and
-// extends its lifetime), "It's gone" votes to resolve it.
-function hazardPopup(h: Hazard, vote: (kind: "confirm" | "resolve") => Promise<Hazard>): HTMLElement {
+/** Marker elements: a ring for the start, a pin for the destination, an amber pin for a report. */
+function markerElement(kind: "start" | "end" | "report"): HTMLElement {
   const el = document.createElement("div");
-  el.className = "text-sm min-w-48";
-  const add = (tag: string, text: string, className = "") => {
-    const node = document.createElement(tag);
-    node.textContent = text;
-    node.className = className;
-    el.appendChild(node);
-    return node;
-  };
-  add("p", HAZARD_STYLE[h.type].label + (h.demo ? "  · DEMO" : ""), "font-semibold text-gray-900");
-  if (h.demo) add("p", "Simulated report for demonstration", "text-xs text-amber-700");
-  if (h.note) add("p", `“${h.note}”`, "text-gray-700");
-  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(h.created_at)) / 60000));
-  const status = add("p", `${h.status === "confirmed" ? "Confirmed" : "Reported"} · ${minutes} min ago · ${h.confirm_count} confirmation(s)`, "text-xs text-gray-500");
-
-  const row = document.createElement("div");
-  row.className = "mt-2 flex gap-2";
-  el.appendChild(row);
-  const button = (label: string, kind: "confirm" | "resolve", className: string) => {
-    const b = document.createElement("button");
-    b.textContent = label;
-    b.className = `rounded-md px-2 py-1 text-xs font-medium ${className}`;
-    b.onclick = async () => {
-      row.querySelectorAll("button").forEach((x) => (x.disabled = true));
-      try {
-        const updated = await vote(kind);
-        status.textContent =
-          updated.status === "resolved" ? "Marked as gone. Thanks!" : `Thanks! ${updated.confirm_count} confirmation(s), ${updated.resolve_count} say it's gone.`;
-      } catch (err) {
-        status.textContent = err instanceof Error ? err.message : "Couldn't save your vote.";
-        row.querySelectorAll("button").forEach((x) => (x.disabled = false));
-      }
-    };
-    row.appendChild(b);
-  };
-  button("Still there", "confirm", "bg-gray-900 text-white hover:bg-gray-700");
-  button("It's gone", "resolve", "bg-gray-100 text-gray-900 hover:bg-gray-200");
+  if (kind === "start") {
+    el.style.cssText = "width:20px;height:20px;border-radius:9999px;background:#fff;border:5px solid #0f766e;box-shadow:0 1px 4px rgb(0 0 0/.35)";
+    el.setAttribute("aria-label", "Start");
+    return el;
+  }
+  const fill = kind === "end" ? "#0f766e" : "#d97706";
+  el.innerHTML = `<svg width="30" height="38" viewBox="0 0 30 38" aria-hidden="true" style="filter:drop-shadow(0 2px 3px rgb(0 0 0/.3))"><path d="M15 37c0 0 13-12.6 13-22.5C28 6.9 22.2 1 15 1S2 6.9 2 14.5C2 24.4 15 37 15 37z" fill="${fill}" stroke="#fff" stroke-width="2"/><circle cx="15" cy="14.5" r="5" fill="#fff"/></svg>`;
+  el.setAttribute("aria-label", kind === "end" ? "Destination" : "Problem location");
   return el;
 }
 
@@ -338,14 +323,14 @@ function addRouteLayers(map: MapLibreMap) {
     id: "service-area",
     type: "line",
     source: "service-area",
-    paint: { "line-color": "#6b7280", "line-width": 1.5, "line-dasharray": [4, 3] },
+    paint: { "line-color": "#78716c", "line-width": 1.5, "line-dasharray": [4, 3] },
   });
   // Dotted grey lines from each clicked point to where the route actually starts/ends.
   map.addLayer({
     id: "snap-connectors",
     type: "line",
     source: "snap-connectors",
-    paint: { "line-color": "#374151", "line-width": 3, "line-dasharray": [1, 1] },
+    paint: { "line-color": "#57534e", "line-width": 3, "line-dasharray": [1, 1] },
   });
   // A wide white "casing" under the route keeps it readable over any basemap colour.
   map.addLayer({
@@ -380,10 +365,10 @@ function addRouteLayers(map: MapLibreMap) {
     type: "circle",
     source: "hazards",
     paint: {
-      "circle-radius": ["case", ["get", "confirmed"], 9, 7],
+      "circle-radius": ["case", ["get", "confirmed"], 10, 8],
       "circle-color": ["get", "color"],
       "circle-stroke-color": "#ffffff",
-      "circle-stroke-width": 2,
+      "circle-stroke-width": 2.5,
     },
   });
   map.addLayer({

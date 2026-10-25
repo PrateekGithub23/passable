@@ -200,3 +200,27 @@ export const createHazard = (h: NewHazard) => postWithSession<Hazard>("/api/v1/h
 /** "Still there" (confirm) or "It's gone" (resolve). */
 export const voteHazard = (id: number, kind: "confirm" | "resolve") =>
   postWithSession<Hazard>(`/api/v1/hazards/${id}/${kind}`);
+
+// ---- Place search ----
+
+/** A named place (building, café, ...) from GET /api/v1/places. */
+export interface Place {
+  name: string;
+  ref?: string; // UW building code, e.g. "DC"
+  kind: string; // e.g. "university", "cafe"
+  point: LngLat;
+}
+
+/** Search places by name, building code or alias ("dc", "dana porter", "e7"). */
+export async function searchPlaces(q: string, signal?: AbortSignal): Promise<Place[]> {
+  const res = await fetch(`${API_URL}/api/v1/places?q=${encodeURIComponent(q)}`, { signal });
+  const body = await res.json();
+  if (!res.ok) throw new ApiError(body.error ?? `Search failed (${res.status})`);
+  return body.results as Place[];
+}
+
+/** One end of a route: where it is, and what to call it in the From/To fields. */
+export interface Waypoint {
+  point: LngLat;
+  label: string; // a place name, or "Point on map" for a tapped location
+}

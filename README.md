@@ -7,7 +7,7 @@ Passable plans routes for three profiles:
 - **stroller** never uses steps and avoids rough ground;
 - **winter walk** avoids steps and unpaved paths, and reacts most strongly to ice.
 
-Every route says how much it trusts the map data (verified, inferred or unknown). Anyone can report a hazard, such as an elevator that's out, a blocked sidewalk, construction or ice. Reports change everyone's routes within seconds. Only the people whose route is affected get a "reroute?" prompt. Reports are confirmed or resolved by votes and expire on their own.
+Every route says how much it trusts the map data (mapped, assumed or not mapped). Anyone can report a hazard, such as an elevator that's out, a blocked sidewalk, construction or ice. Reports change everyone's routes within seconds. Only the people whose route is affected get a "reroute?" prompt. Reports are confirmed or resolved by votes and expire on their own.
 
 **Live:** https://passable-alpha.vercel.app · [status](https://passable-alpha.vercel.app/status) · [about & limitations](https://passable-alpha.vercel.app/about) · API: https://passable-api.fly.dev
 
@@ -31,7 +31,7 @@ cd web && npm install && npm run dev    # http://localhost:3000
 ```
 
 Then, on the map:
-1. **Get a route:** click a start point, then a destination, and switch profiles to compare. Line colours show confidence: dark blue is verified, light blue inferred, dashed amber unknown.
+1. **Get a route:** search a building ("DC", "SLC", "dana porter") or tap the map for the start and the destination, then switch profiles to compare. Line colours show confidence: dark teal is mapped, light teal assumed, dashed amber not mapped.
 2. **Report a problem:** press **Report a problem**, tap the spot, choose what it is, and send.
 3. **See live updates:** open a second browser window with a route over that spot. It gets the reroute prompt.
 4. **Without real reports:** `go run ./cmd/simulator` files clearly labelled demo hazards and cleans up when you press Ctrl-C.
