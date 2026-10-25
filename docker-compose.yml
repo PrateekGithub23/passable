@@ -10,10 +10,10 @@ services:
     # Host port 5433: a local Postgres already owns 5432.
     ports:
       - "5433:5432"
+    # Schema is managed by goose (`go run ./cmd/migrate`), not Docker init scripts: the .sql
+    # files contain "-- +goose Down" sections that an init script would also execute.
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Init scripts only run on first volume creation; schema changes need `docker compose down -v`.
-      - ./db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U passable -d passable"]
       interval: 5s

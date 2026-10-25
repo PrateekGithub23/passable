@@ -10,6 +10,8 @@ import (
 	"github.com/PrateekGithub23/passable/internal/cost"
 	"github.com/PrateekGithub23/passable/internal/geo"
 	"github.com/PrateekGithub23/passable/internal/graph"
+	"github.com/PrateekGithub23/passable/internal/hazard"
+	"github.com/PrateekGithub23/passable/internal/overlay"
 )
 
 // lineGraph builds A - B - C - D - E heading east, ~200 m apart, where B-C is steps and the
@@ -53,8 +55,8 @@ func near(g *graph.Graph, ei int32, frac float64) []candidate {
 
 func TestPlanAccessible(t *testing.T) {
 	g := lineGraph()
-	s := New(nil, g)
-	resp, status, msg := s.plan(cost.Wheelchair, near(g, 2, 0.5), near(g, 3, 0.5))
+	s := New(Config{Graph: g, Overlay: overlay.NewHolder(overlay.Build(0, nil))})
+	resp, status, msg := s.plan(s.view(cost.Wheelchair), near(g, 2, 0.5), near(g, 3, 0.5))
 	if status != http.StatusOK || !resp.Accessible || len(resp.Barriers) != 0 {
 		t.Fatalf("status %d %q, resp %+v", status, msg, resp)
 	}
@@ -68,9 +70,9 @@ func TestPlanAccessible(t *testing.T) {
 
 func TestPlanExplainsBarrier(t *testing.T) {
 	g := lineGraph()
-	s := New(nil, g)
+	s := New(Config{Graph: g, Overlay: overlay.NewHolder(overlay.Build(0, nil))})
 	// Start on A-B: its only usable edges are cut off from the larger component by the steps.
-	resp, status, msg := s.plan(cost.Wheelchair, near(g, 0, 0.5), near(g, 3, 0.5))
+	resp, status, msg := s.plan(s.view(cost.Wheelchair), near(g, 0, 0.5), near(g, 3, 0.5))
 	if status != http.StatusOK {
 		t.Fatalf("status %d %q", status, msg)
 	}
@@ -85,7 +87,7 @@ func TestPlanExplainsBarrier(t *testing.T) {
 	}
 
 	// The same trip is fine for walk_winter, which only penalizes steps.
-	resp, _, _ = s.plan(cost.WalkWinter, near(g, 0, 0.5), near(g, 3, 0.5))
+	resp, _, _ = s.plan(s.view(cost.WalkWinter), near(g, 0, 0.5), near(g, 3, 0.5))
 	if !resp.Accessible || len(resp.Barriers) != 0 {
 		t.Errorf("walk_winter: want accessible, got %+v", resp)
 	}
@@ -93,12 +95,12 @@ func TestPlanExplainsBarrier(t *testing.T) {
 
 func TestPlanTooFar(t *testing.T) {
 	g := lineGraph()
-	s := New(nil, g)
+	s := New(Config{Graph: g, Overlay: overlay.NewHolder(overlay.Build(0, nil))})
 	far := near(g, 0, 0.5)
 	for i := range far {
 		far[i].distM += maxSnapM
 	}
-	if _, status, _ := s.plan(cost.Wheelchair, far, near(g, 3, 0.5)); status != http.StatusUnprocessableEntity {
+	if _, status, _ := s.plan(s.view(cost.Wheelchair), far, near(g, 3, 0.5)); status != http.StatusUnprocessableEntity {
 		t.Errorf("status %d, want 422", status)
 	}
 }
@@ -124,5 +126,44 @@ func TestCORS(t *testing.T) {
 		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != c.wantAllow || rec.Code != c.wantStatus {
 			t.Errorf("%s %s: allow-origin %q status %d, want %q %d", c.method, c.origin, got, rec.Code, c.wantAllow, c.wantStatus)
 		}
+	}
+}
+
+// TestPlanSeesHazards: a hazard applied to the overlay changes the route on the very next
+// query (no restart, no cache flush), shows up as a named barrier, and bumps the version.
+func TestPlanSeesHazards(t *testing.T) {
+	g := lineGraph()
+	holder := overlay.NewHolder(overlay.Build(0, nil))
+	s := New(Config{Graph: g, Overlay: holder})
+	from, to := near(g, 0, 0.5), near(g, 3, 0.5)
+
+	// Before: walk_winter can use every edge (steps are only penalized).
+	resp, _, _ := s.plan(s.view(cost.WalkWinter), from, to)
+	if !resp.Accessible || resp.GraphVersion != 0 {
+		t.Fatalf("before: want accessible at version 0, got %+v", resp)
+	}
+
+	// Report a blocked sidewalk on C-D (edge index 2), the only way through.
+	block := overlay.Hazard{ID: 42, Edge: 2, Type: hazard.BlockedSidewalk, Severity: hazard.Major, Status: hazard.Active}
+	if err := holder.Apply(overlay.Event{Seq: 1, Hazard: block}); err != nil {
+		t.Fatal(err)
+	}
+	resp, _, _ = s.plan(s.view(cost.WalkWinter), from, to)
+	if resp.Accessible || resp.GraphVersion != 1 || len(resp.Barriers) != 1 {
+		t.Fatalf("with hazard: want 1 barrier at version 1, got accessible=%v version=%d barriers=%+v",
+			resp.Accessible, resp.GraphVersion, resp.Barriers)
+	}
+	if !slices.Contains(resp.Barriers[0].Reasons, "reported blocked sidewalk (#42)") {
+		t.Errorf("barrier reasons %v should name the report", resp.Barriers[0].Reasons)
+	}
+
+	// Resolve it: the route is back, at version 2.
+	block.Status = hazard.Resolved
+	if err := holder.Apply(overlay.Event{Seq: 2, Hazard: block}); err != nil {
+		t.Fatal(err)
+	}
+	resp, _, _ = s.plan(s.view(cost.WalkWinter), from, to)
+	if !resp.Accessible || resp.GraphVersion != 2 {
+		t.Fatalf("after resolve: want accessible at version 2, got accessible=%v version=%d", resp.Accessible, resp.GraphVersion)
 	}
 }

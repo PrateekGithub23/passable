@@ -105,3 +105,45 @@ Each entry: what was chosen, what was rejected, and why.
 ## 17. CORS: echo allowlisted origins instead of `*`
 **Chose:** `api.WithCORS` sets `Access-Control-Allow-Origin` only for origins listed in `CORS_ORIGINS` (default `http://localhost:3000`), adds `Vary: Origin`, and answers preflight requests for the upcoming POST endpoints.
 **Why:** the frontend and API are on different origins in development (ports 3000 and 8080) and in production (Vercel and Fly.io). An allowlist stops arbitrary sites from calling the API from a visitor's browser, which matters once hazard reports are accepted.
+
+## 18. Migrations with goose, embedded in the binary
+**Chose:** `pressly/goose` with SQL files in `db/migrations`, embedded via `go:embed`, and run by `go run ./cmd/migrate [up|down|status]`. 001 and 002 were rewritten as idempotent (`IF NOT EXISTS`), so goose adopted the existing dev database without dropping it. The Docker init-script mount was removed, because an init script would also execute the `-- +goose Down` `DROP` statements.
+**Rejected:** golang-migrate (separate up/down files and a heavier CLI), keeping Docker init scripts (they only run on an empty volume, and nothing records which schema version a database is at), and auto-migrating on API startup (with several instances, schema changes should be one explicit step in the deploy).
+**Verified:** `up` on the existing database kept all 21,173 edges, and a `down`/`up` round trip of 003 drops and recreates its five tables.
+
+## 19. Hazard overlay: copy-on-write snapshots, versioned by a global event sequence
+**Chose:**
+- **Immutable snapshots.** `overlay.Snapshot` holds the live hazards plus, for each affected edge, the combined effect per profile. It lives behind `atomic.Pointer` (`overlay.Holder`).
+- **One load per request.** Each route request loads the snapshot once (`api.view`) and uses it for the cache key, snapping, the search and the explanation.
+- **Writers copy, then swap.** A writer clones the two small maps (size proportional to the number of live hazards, not the graph), applies one event, and swaps the pointer. Writers are serialized by a mutex; readers never lock.
+- **Version = event seq.** The version is `hazard_events.seq`. Every hazard write transaction first takes `pg_advisory_xact_lock`, so writes are serialized across all instances and seq order equals commit order.
+- **Events in strict order.** An instance applies events only when `seq == current + 1`, ignores duplicates, and on a gap rebuilds from Postgres in one `REPEATABLE READ` read (all live reports plus `max(seq)`). Events carry the report's full new state, so applying one is an upsert or a delete.
+
+**Rejected:** an `RWMutex` around mutable costs (a long search holding the read lock blocks writers, and queued writers then block new searches); and a per-instance counter as the version (two instances would give different versions for the same hazard state, which breaks a shared Redis cache).
+**Why:** route queries never wait on hazard writes and always see one consistent set of costs. `TestConcurrentRoutingSeesConsistentSnapshots` checks this under `-race`: 27,055 routes ran while the writer swapped the snapshot 141,586 times, and every route's cost equalled the sum of its edges in the snapshot it loaded, with no route using an edge that snapshot blocks.
+**Cost:** Day 5 benchmark, wheelchair p50 521 µs with 0 hazards and 569 µs with 50, against 493 µs on Day 2 before the overlay existed.
+
+## 20. Hazard effects and lifecycle
+**Chose:** effects per profile, as a pure table in `internal/hazard`:
+
+| Hazard | wheelchair | stroller | walk_winter |
+|---|---|---|---|
+| elevator_out | block | block | – |
+| blocked_sidewalk | block | block | block |
+| construction | block | ×2 | ×1.5 |
+| ice_snow | ×3 | ×2 | ×4 |
+| missing_curb_ramp | block | ×1.5 | – |
+
+`major` severity turns soft effects into blocks for wheelchair and stroller, and doubles walk_winter's multiplier. Several hazards on one edge combine as "any block, otherwise the largest multiplier".
+
+**Lifecycle:** a report starts `active`. 2 confirmations from other sessions make it `confirmed`. 2 resolve votes, or the reporter voting resolve, make it `resolved`. Past its TTL it becomes `expired`. TTLs: ice 12 h, blocked sidewalk 24 h, elevator 48 h, construction 7 d, missing curb ramp 30 d. A confirmation resets the deadline to a full TTL from now, so hazards people keep seeing stay alive and forgotten ones fade out. Votes are one per session per report and can be changed; repeating the same vote writes nothing, so it doesn't bump the graph version. A background worker (`RunExpiry`, every 30 s) expires overdue reports. Several instances can run it safely, because the advisory lock plus `WHERE status IN (live)` expires each report once.
+**Why:** walk_winter has no static blocks, so it is the profile that reacts most to hazards, as the plan specifies. The thresholds are low because the campus is small and fast reaction matters more than certainty. Reports decay without anyone having to clean them up.
+
+## 21. Route cache in Redis keyed by graph version; fails open
+**Chose:** cache the full route response under `route:v{seq}:{profile}:{from}:{to}`, with coordinates rounded to 5 decimals (~1 m), for 10 minutes. Requests are rounded the same way before routing, so a key always describes exactly one response. Redis calls have a 50 ms timeout, and any Redis error counts as a miss. `X-Cache` and `X-Graph-Version` headers show what happened.
+**Why:** a hazard change bumps seq, so new requests use new keys and stale routes are never served, with no invalidation logic. If Redis goes down, routing still works.
+
+## 22. Anonymous sessions via a server-issued id in a header
+**Chose:** `POST /api/v1/session` returns a random 128-bit id, which the client sends as `X-Session-ID` on writes. Unknown or missing ids get 401.
+**Rejected:** cookies, which would need `SameSite=None; Secure` across the Vercel and Fly domains; and client-generated ids (the server couldn't tell a real session from a made-up string).
+**Why:** no accounts (out of scope), but one vote per person per report still needs an identity, and rate limiting (Day 7) will key on it.

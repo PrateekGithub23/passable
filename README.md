@@ -2,7 +2,7 @@
 
 Accessibility-aware pedestrian routing for the University of Waterloo campus and uptown Waterloo. Passable finds routes for three profiles. `wheelchair` treats steps as impassable and penalizes or blocks bad surfaces and missing or high kerbs. `stroller` blocks steps and applies milder penalties. `walk_winter` applies soft penalties and reacts strongly to hazards. Each segment is labelled `verified`, `inferred` or `unknown`, so the route says how much it trusts the map data. People can report hazards (elevator out, blocked sidewalk, ice); reports decay over time and are confirmed or resolved by votes. A copy-on-write overlay applies the reports to routing without blocking route queries, and anyone whose active route crosses an affected edge is told over WebSocket.
 
-> Status: Day 4 of 10. OSM import, in-memory graph, per-profile cost model, A* routing, HTTP API, and a map UI: click two points and see the route for each profile.
+> Status: Day 5 of 10. Routing, map UI, and crowd-sourced hazard reports that change routes immediately (copy-on-write overlay, versioned route cache).
 
 ## Running locally
 
@@ -10,6 +10,7 @@ Requires Docker, Go 1.22+, `curl` and `jq`.
 
 ```sh
 docker compose up -d --wait   # Postgres+PostGIS on localhost:5433, Redis on 6379
+go run ./cmd/migrate          # apply database migrations (goose)
 scripts/gate.sh               # tag-coverage counts from Overpass
 scripts/fetch_osm.sh          # downloads data/ways.json and data/nodes.json
 go run ./cmd/importer         # loads the graph (flags: -ways, -nodes, -db)
@@ -42,9 +43,30 @@ curl localhost:8080/healthz
 
 When no fully accessible route exists, the response has `accessible: false` and a `barriers` list naming what blocks the profile.
 
+### Hazard reports
+
+```sh
+SID=$(curl -s -X POST localhost:8080/api/v1/session | jq -r .session_id)
+curl -X POST localhost:8080/api/v1/hazards -H "X-Session-ID: $SID" -H 'Content-Type: application/json' \
+     -d '{"lat":43.47087,"lng":-80.54274,"type":"blocked_sidewalk","note":"fenced off"}'
+curl -X POST localhost:8080/api/v1/hazards/1/confirm -H "X-Session-ID: $SID"    # or /resolve
+curl 'localhost:8080/api/v1/hazards?bbox=-80.565,43.455,-80.505,43.485'
+curl localhost:8080/api/v1/graph/version
+```
+
+Hazard types are `elevator_out`, `blocked_sidewalk`, `construction`, `ice_snow` and `missing_curb_ramp`. A new report changes routes from the very next request:
+- the response's `graph_version` increases;
+- the route cache key changes;
+- affected segments list the report under `hazards`;
+- if a hazard leaves no way through, it appears as a named barrier.
+
+Reports move from `active` to `confirmed` (2 confirmations), then to `resolved` (2 resolve votes, or the reporter) or `expired` (per-type TTL, extended by each confirmation).
+
 `/places?q=` matches UW building codes exactly (`dc`, `slc`, `e7`), matches word prefixes (`dav`), and tolerates typos (`dana portr`).
 
-## Routing performance (Day 2)
+## Routing performance
+
+Day 5 numbers, with the hazard overlay on the hot path: wheelchair p50 521 µs and p99 2.81 ms with 0 live hazards; 569 µs and 3.03 ms with 50 ([`docs/benchmarks/day5.md`](docs/benchmarks/day5.md)). Day 2 baseline before the overlay:
 
 From `go run ./cmd/bench` on an Apple M4: 2000 random queries per profile, mean straight-line distance about 1.95 km. Times are for one in-process A* search. Full output: [`docs/benchmarks/day2.md`](docs/benchmarks/day2.md).
 
