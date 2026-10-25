@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PrateekGithub23/passable/internal/metrics"
 	"github.com/PrateekGithub23/passable/internal/ratelimit"
 )
 
@@ -23,6 +24,7 @@ var (
 	limitPlacesIP     = ratelimit.Rule{Name: "places-ip", Burst: 30, Per: 300 * time.Millisecond}
 	limitWebSocketIP  = ratelimit.Rule{Name: "ws-ip", Burst: 10, Per: 10 * time.Second}
 	limitListHazardIP = ratelimit.Rule{Name: "hazards-ip", Burst: 60, Per: 500 * time.Millisecond}
+	limitStatusIP     = ratelimit.Rule{Name: "status-ip", Burst: 20, Per: time.Second}
 )
 
 // keyed pairs a rule with how to derive its bucket key from a request.
@@ -46,6 +48,7 @@ func (s *Server) limit(h http.HandlerFunc, rules ...keyed) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		for _, k := range rules {
 			if ok, wait := s.limiter.Allow(r.Context(), k.rule, k.key(r)); !ok {
+				metrics.RateLimited.WithLabelValues(k.rule.Name).Inc()
 				secs := ratelimit.RetryAfterSeconds(wait)
 				w.Header().Set("Retry-After", strconv.Itoa(secs))
 				writeError(w, http.StatusTooManyRequests, fmt.Sprintf("too many requests; try again in %d s", secs))

@@ -1,0 +1,43 @@
+# Fly.io config for the Go API. App names are global on Fly: if "passable-api" is taken,
+# `fly launch --no-deploy --copy-config` will offer to change it here.
+app = "passable-api"
+primary_region = "iad"            # US East, next to Neon's us-east-1
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  # Runs once per deploy, in a temporary machine with the app's secrets, before new API
+  # machines start: schema changes land first, and a failed migration aborts the deploy.
+  release_command = "/app/migrate"
+
+[env]
+  PORT = "8080"
+  # Fly's proxy puts the real client address here; rate limits key on it (DECISIONS #25).
+  TRUSTED_IP_HEADER = "Fly-Client-IP"
+  # Expiry + missed-event catch-up cadence. Longer than the 30 s default so a free-tier
+  # Postgres that suspends when idle isn't woken every 30 s; TTLs are hours, so 10 min is fine.
+  EXPIRY_INTERVAL = "10m"
+  # Overwritten with the Vercel URL after the frontend is deployed.
+  CORS_ORIGINS = "http://localhost:3000"
+  # Secrets (set with `fly secrets set`, never committed): DATABASE_URL, REDIS_URL
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Keep one machine always running: it holds the in-memory graph and WebSocket connections,
+  # and a cold start (graph load ~0.3 s + DB wake-up) on the first request would be noticeable.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "15s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

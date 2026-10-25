@@ -11,11 +11,13 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/PrateekGithub23/passable/internal/cache"
 	"github.com/PrateekGithub23/passable/internal/cost"
 	"github.com/PrateekGithub23/passable/internal/graph"
 	"github.com/PrateekGithub23/passable/internal/live"
+	"github.com/PrateekGithub23/passable/internal/metrics"
 	"github.com/PrateekGithub23/passable/internal/overlay"
 	"github.com/PrateekGithub23/passable/internal/ratelimit"
 	"github.com/PrateekGithub23/passable/internal/reports"
@@ -38,6 +40,10 @@ type Config struct {
 	IPHeader string
 	// Recorder logs per-request routing stats to route_requests; nil disables it.
 	Recorder *Recorder
+	// Propagation holds recent hazard propagation samples (ms) for GET /api/v1/status.
+	Propagation *metrics.Window
+	// Started is when the process started (for uptime on the status page).
+	Started time.Time
 }
 
 // Server holds the graph and per-profile base costs (read-only after New) and the live hazard
@@ -51,6 +57,9 @@ type Server struct {
 	limiter  *ratelimit.Limiter
 	ipHeader string
 	recorder *Recorder
+	live     *live.Hub
+	propag   *metrics.Window
+	started  time.Time
 	profiles map[cost.Profile]*profileState
 	anyComp  []int32 // components of the full graph, for snapping explanation routes
 	anyMain  int32
@@ -73,6 +82,7 @@ func New(cfg Config) *Server {
 	s := &Server{
 		db: cfg.DB, g: cfg.Graph, overlay: cfg.Overlay, reports: cfg.Reports, cache: cfg.Cache,
 		limiter: cfg.Limiter, ipHeader: cfg.IPHeader, recorder: cfg.Recorder,
+		live: cfg.Live, propag: cfg.Propagation, started: cfg.Started,
 		profiles: map[cost.Profile]*profileState{}, mux: http.NewServeMux(),
 	}
 
@@ -98,6 +108,8 @@ func New(cfg Config) *Server {
 	// Each handler is wrapped in its rate limits (see limits.go); /healthz is never limited
 	// so load balancers can always probe.
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.mux.Handle("GET /metrics", metrics.Handler())
+	s.mux.HandleFunc("GET /api/v1/status", s.limit(s.handleStatus, s.byIP(limitStatusIP)))
 	s.mux.HandleFunc("GET /api/v1/route", s.limit(s.handleRoute, s.byIP(limitRouteIP)))
 	s.mux.HandleFunc("GET /api/v1/places", s.limit(s.handlePlaces, s.byIP(limitPlacesIP)))
 	s.mux.HandleFunc("GET /api/v1/graph/version", s.handleVersion)
