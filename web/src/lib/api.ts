@@ -113,6 +113,7 @@ export interface Hazard {
   resolve_count: number;
   created_at: string;
   expires_at: string;
+  demo: boolean; // filed by the demo simulator, not a real person
 }
 
 /** [west, south, east, north] */
@@ -128,3 +129,74 @@ export async function fetchHazards(bbox: BBox, signal?: AbortSignal): Promise<{ 
 
 /** WebSocket endpoint: same host as the API, ws:// or wss:// instead of http:// or https://. */
 export const WS_URL = API_URL.replace(/^http/, "ws") + "/ws";
+
+// ---- Writes (need an anonymous session) ----
+
+const SESSION_KEY = "passable.session";
+let sessionPromise: Promise<string> | null = null;
+
+/**
+ * The anonymous session id the API uses to count one vote per person per report. Created on
+ * first use with POST /api/v1/session and kept in localStorage, so a returning visitor is
+ * the same "person" and can't confirm the same report twice by reloading.
+ */
+function getSession(): Promise<string> {
+  if (!sessionPromise) {
+    sessionPromise = (async () => {
+      try {
+        const saved = localStorage.getItem(SESSION_KEY);
+        if (saved) return saved;
+      } catch {
+        // storage blocked (private mode): fall through to a session for this page only
+      }
+      const res = await fetch(`${API_URL}/api/v1/session`, { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new ApiError(body.error ?? "Could not start a session");
+      try {
+        localStorage.setItem(SESSION_KEY, body.session_id);
+      } catch {}
+      return body.session_id as string;
+    })();
+    sessionPromise.catch(() => (sessionPromise = null)); // let the next call retry
+  }
+  return sessionPromise;
+}
+
+/** POST with the session header. If the server no longer knows our session (e.g. the
+ *  database was reset), get a fresh one and retry once. */
+async function postWithSession<T>(path: string, body?: object): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const sid = await getSession();
+    const res = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Session-ID": sid },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const json = await res.json();
+    if (res.status === 401 && attempt === 0) {
+      try {
+        localStorage.removeItem(SESSION_KEY);
+      } catch {}
+      sessionPromise = null;
+      continue;
+    }
+    if (!res.ok) throw new ApiError(json.error ?? `Request failed (${res.status})`);
+    return json as T;
+  }
+  throw new ApiError("Could not start a session");
+}
+
+export interface NewHazard {
+  lat: number;
+  lng: number;
+  type: HazardType;
+  severity: "minor" | "major";
+  note?: string;
+}
+
+/** File a hazard report. The server attaches it to the nearest path (within 30 m). */
+export const createHazard = (h: NewHazard) => postWithSession<Hazard>("/api/v1/hazards", h);
+
+/** "Still there" (confirm) or "It's gone" (resolve). */
+export const voteHazard = (id: number, kind: "confirm" | "resolve") =>
+  postWithSession<Hazard>(`/api/v1/hazards/${id}/${kind}`);

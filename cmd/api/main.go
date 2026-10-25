@@ -23,6 +23,7 @@ import (
 	"github.com/PrateekGithub23/passable/internal/graph"
 	"github.com/PrateekGithub23/passable/internal/live"
 	"github.com/PrateekGithub23/passable/internal/overlay"
+	"github.com/PrateekGithub23/passable/internal/ratelimit"
 	"github.com/PrateekGithub23/passable/internal/reports"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -34,6 +35,8 @@ func main() {
 	cors := flag.String("cors", envOr("CORS_ORIGINS", "http://localhost:3000"), "comma-separated origins allowed to call the API from a browser")
 	redisURL := flag.String("redis", envOr("REDIS_URL", "redis://localhost:6379/0"), "Redis URL for the route cache (empty disables it)")
 	expiryEvery := flag.Duration("expiry-interval", 30*time.Second, "how often to expire hazard reports past their TTL")
+	rateLimit := flag.Bool("rate-limit", envOr("RATE_LIMIT", "true") == "true", "enforce rate limits (needs Redis); disable for load tests")
+	ipHeader := flag.String("ip-header", os.Getenv("TRUSTED_IP_HEADER"), "header a trusted proxy sets to the client IP (e.g. Fly-Client-IP); empty = TCP peer")
 	flag.Parse()
 
 	// ctx is cancelled on Ctrl-C or SIGTERM (what Docker/Fly send on shutdown).
@@ -74,6 +77,7 @@ func main() {
 	// runs alone (no cache, and events only reach its own WebSocket clients).
 	var routeCache *cache.RouteCache
 	var bus *live.Bus
+	var limiter *ratelimit.Limiter
 	if *redisURL != "" {
 		opts, err := redis.ParseURL(*redisURL)
 		if err != nil {
@@ -92,6 +96,10 @@ func main() {
 		} else {
 			routeCache = cache.New(rdb, 10*time.Minute)
 			log.Printf("route cache + event bus: redis %s", opts.Addr)
+		}
+		if routeCache != nil && *rateLimit {
+			limiter = ratelimit.New(rdb)
+			log.Printf("rate limits: on")
 		}
 	}
 
@@ -121,7 +129,7 @@ func main() {
 	// Start the expiry worker only now: it reads svc.OnCommit, which must be set first.
 	go svc.RunExpiry(ctx, *expiryEvery) // background worker; stops when ctx is cancelled
 
-	srv := api.New(api.Config{DB: pool, Graph: g, Overlay: holder, Reports: svc, Cache: routeCache, Live: hub})
+	srv := api.New(api.Config{DB: pool, Graph: g, Overlay: holder, Reports: svc, Cache: routeCache, Live: hub, Limiter: limiter, IPHeader: *ipHeader})
 
 	// Timeouts stop slow or stuck clients from holding connections open forever.
 	hs := &http.Server{Addr: *addr, Handler: api.WithCORS(srv, origins), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}

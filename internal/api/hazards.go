@@ -82,6 +82,7 @@ type createHazardRequest struct {
 	Type     string  `json:"type"`
 	Severity string  `json:"severity"` // optional; defaults per type
 	Note     string  `json:"note"`     // optional, <= 280 characters
+	Demo     bool    `json:"demo"`     // set by the demo simulator; shown as "Demo" in the UI
 }
 
 func (s *Server) handleCreateHazard(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +130,7 @@ func (s *Server) handleCreateHazard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rep, err := s.reports.Create(r.Context(), r.Header.Get(sessionHeader), reports.CreateInput{
-		Edge: cands[0].edge, Type: typ, Severity: sev, Note: note, Lat: pt.Lat, Lon: pt.Lon,
+		Edge: cands[0].edge, Type: typ, Severity: sev, Note: note, Lat: pt.Lat, Lon: pt.Lon, Demo: req.Demo,
 	})
 	if err != nil {
 		writeReportError(w, err)

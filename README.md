@@ -2,7 +2,7 @@
 
 Accessibility-aware pedestrian routing for the University of Waterloo campus and uptown Waterloo. Passable finds routes for three profiles. `wheelchair` treats steps as impassable and penalizes or blocks bad surfaces and missing or high kerbs. `stroller` blocks steps and applies milder penalties. `walk_winter` applies soft penalties and reacts strongly to hazards. Each segment is labelled `verified`, `inferred` or `unknown`, so the route says how much it trusts the map data. People can report hazards (elevator out, blocked sidewalk, ice); reports decay over time and are confirmed or resolved by votes. A copy-on-write overlay applies the reports to routing without blocking route queries, and anyone whose active route crosses an affected edge is told over WebSocket.
 
-> Status: Day 6 of 10. Routing, map UI, crowd-sourced hazard reports that change routes immediately, and live updates: hazards appear on every open map, and users whose route is affected get a "reroute?" prompt.
+> Status: Day 7 of 10, feature complete (freeze). Routing for three profiles, a map UI with a report-a-problem flow, crowd-sourced hazards that change routes immediately, live updates with a "reroute?" prompt, rate limiting, and a labelled demo simulator.
 
 ## Running locally
 
@@ -22,7 +22,13 @@ go test -race ./...
 cd web && npm install && npm run dev   # map UI on http://localhost:3000
 ```
 
-In the UI, click once for the start and again for the destination, then switch profiles to compare routes. Line colours show confidence: dark blue is verified, light blue is inferred, and dashed amber is unknown. Red marks barriers. A dotted grey line joins each clicked point to where the route actually starts on the network.
+In the UI, click once for the start and again for the destination, then switch profiles to compare routes. "Report a problem" files a hazard: tap the spot, choose what it is, send. Tap any hazard marker to say "Still there" or "It's gone".
+
+To see live features without real reports, run the demo simulator. Its hazards are labelled "Demo", and it cleans up after itself when you press Ctrl-C:
+
+```sh
+go run ./cmd/simulator -every 45s -max 6
+``` Line colours show confidence: dark blue is verified, light blue is inferred, and dashed amber is unknown. Red marks barriers. A dotted grey line joins each clicked point to where the route actually starts on the network.
 
 If Overpass rate-limits you, set `OVERPASS=https://overpass.kumi.systems/api/interpreter`.
 
@@ -53,6 +59,8 @@ curl -X POST localhost:8080/api/v1/hazards/1/confirm -H "X-Session-ID: $SID"    
 curl 'localhost:8080/api/v1/hazards?bbox=-80.565,43.455,-80.505,43.485'
 curl localhost:8080/api/v1/graph/version
 ```
+
+Writes are rate-limited per session and per IP (Redis token buckets; a session can file 5 reports at once, then 20/hour). Over the limit, the API returns `429` with `Retry-After`. See `DECISIONS.md` #25 for every limit.
 
 Hazard types are `elevator_out`, `blocked_sidewalk`, `construction`, `ice_snow` and `missing_curb_ramp`. A new report changes routes from the very next request:
 - the response's `graph_version` increases;

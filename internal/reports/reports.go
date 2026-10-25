@@ -52,16 +52,17 @@ type Report struct {
 	ResolveCount int             `json:"resolve_count"`
 	CreatedAt    time.Time       `json:"created_at"`
 	ExpiresAt    time.Time       `json:"expires_at"`
+	Demo         bool            `json:"demo"` // created by the demo simulator; the UI labels it
 }
 
 // reportCols is the SELECT/RETURNING column list that scanReport reads.
 const reportCols = `id, edge_id, type, severity, status, coalesce(note, ''), ST_X(geom), ST_Y(geom),
-	confirm_count, resolve_count, created_at, expires_at`
+	confirm_count, resolve_count, created_at, expires_at, is_demo`
 
 func scanReport(row pgx.Row) (Report, error) {
 	var r Report
 	err := row.Scan(&r.ID, &r.EdgeID, &r.Type, &r.Severity, &r.Status, &r.Note, &r.Point[0], &r.Point[1],
-		&r.ConfirmCount, &r.ResolveCount, &r.CreatedAt, &r.ExpiresAt)
+		&r.ConfirmCount, &r.ResolveCount, &r.CreatedAt, &r.ExpiresAt, &r.Demo)
 	return r, err
 }
 
@@ -124,6 +125,7 @@ type CreateInput struct {
 	Severity hazard.Severity
 	Note     string
 	Lat, Lon float64
+	Demo     bool
 }
 
 // Create stores a new report and applies it to the overlay.
@@ -138,10 +140,10 @@ func (s *Service) Create(ctx context.Context, sessionID string, in CreateInput) 
 			note = &in.Note
 		}
 		r, err := scanReport(tx.QueryRow(ctx, `
-			INSERT INTO hazard_reports (edge_id, type, severity, note, geom, reporter_session_id, created_at, updated_at, expires_at)
-			VALUES ($1, $2, $3, $4, ST_SetSRID(ST_MakePoint($5, $6), 4326), $7, $8, $8, $9)
+			INSERT INTO hazard_reports (edge_id, type, severity, note, geom, reporter_session_id, created_at, updated_at, expires_at, is_demo)
+			VALUES ($1, $2, $3, $4, ST_SetSRID(ST_MakePoint($5, $6), 4326), $7, $8, $8, $9, $10)
 			RETURNING `+reportCols,
-			s.g.Edges[in.Edge].ID, in.Type, in.Severity, note, in.Lon, in.Lat, sessionID, now, now.Add(hazard.TTL(in.Type))))
+			s.g.Edges[in.Edge].ID, in.Type, in.Severity, note, in.Lon, in.Lat, sessionID, now, now.Add(hazard.TTL(in.Type)), in.Demo))
 		return r, "created", err
 	})
 }

@@ -31,10 +31,12 @@ export function formatDistance(m: number): string {
 
 
 /** Hazard markers: one colour per type, so the map reads at a glance. */
-export const HAZARD_STYLE: Record<HazardType, { label: string; color: string }> = {
-  blocked_sidewalk: { label: "Blocked sidewalk", color: "#dc2626" }, // red
-  construction: { label: "Construction", color: "#ea580c" }, // orange
-  elevator_out: { label: "Elevator out", color: "#7c3aed" }, // violet
-  ice_snow: { label: "Ice / snow", color: "#0891b2" }, // cyan
-  missing_curb_ramp: { label: "Missing curb ramp", color: "#be185d" }, // pink
+// `hint` is the one-line explanation shown in the report form, written for someone who has
+// never seen the app. `blocks` is the default answer to "can people get past it?".
+export const HAZARD_STYLE: Record<HazardType, { label: string; color: string; hint: string; blocks: boolean }> = {
+  blocked_sidewalk: { label: "Blocked sidewalk", color: "#dc2626", hint: "Something is in the way: fence, vehicle, snowbank", blocks: true }, // red
+  ice_snow: { label: "Ice or snow", color: "#0891b2", hint: "Slippery or not cleared", blocks: false }, // cyan
+  construction: { label: "Construction", color: "#ea580c", hint: "Path dug up or fenced off for work", blocks: true }, // orange
+  elevator_out: { label: "Elevator out", color: "#7c3aed", hint: "An elevator or lift isn't working", blocks: true }, // violet
+  missing_curb_ramp: { label: "No curb ramp", color: "#be185d", hint: "No ramp where the sidewalk meets the road", blocks: true }, // pink
 };
