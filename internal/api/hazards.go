@@ -119,7 +119,7 @@ func (s *Server) handleCreateHazard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Attach the report to the nearest mapped path (any path: a hazard on steps matters too).
-	cands, err := s.candidates(r.Context(), pt)
+	cands, err := s.candidates(r.Context(), pt, knnCandidates)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "snap failed")
 		return

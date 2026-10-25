@@ -129,7 +129,11 @@ func main() {
 	// Start the expiry worker only now: it reads svc.OnCommit, which must be set first.
 	go svc.RunExpiry(ctx, *expiryEvery) // background worker; stops when ctx is cancelled
 
-	srv := api.New(api.Config{DB: pool, Graph: g, Overlay: holder, Reports: svc, Cache: routeCache, Live: hub, Limiter: limiter, IPHeader: *ipHeader})
+	// Per-request routing stats (route_requests), written in the background.
+	recorder := api.NewRecorder(pool)
+	go recorder.Run(ctx)
+
+	srv := api.New(api.Config{DB: pool, Graph: g, Overlay: holder, Reports: svc, Cache: routeCache, Live: hub, Limiter: limiter, IPHeader: *ipHeader, Recorder: recorder})
 
 	// Timeouts stop slow or stuck clients from holding connections open forever.
 	hs := &http.Server{Addr: *addr, Handler: api.WithCORS(srv, origins), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}

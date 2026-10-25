@@ -201,3 +201,17 @@ Refusals are `429` with `Retry-After`. Writes are limited per session *and* per 
 **Verified** with a headless "stranger" test that finds every control only by its visible text. It covered an off-path tap and its guidance, a successful report, a second person confirming it, and the reporter resolving it. The test caught two layout bugs that are now fixed: the Send button was below the fold at 800 px, and on phones MapLibre's expanded attribution covered the report button (fixed with compact attribution, plus a full-width bottom sheet with pinned buttons).
 
 **Feature freeze** from here on, as planned: Days 8–10 are tests, load tests, deployment and docs only.
+
+## 28. Snapping looks wider when the nearest edges are a disconnected cluster
+**Chose:** fetch 64 KNN candidates (was 20). If none of them is on the main network within 150 m, query again with 400 before answering "no mapped path".
+**Why:** found by the Day 8 load test. Inside buildings, OSM maps indoor corridors and stairs (`indoor=yes`) as dense networks that aren't connected to the outdoor paths. At one campus point all 20 nearest edges were indoor, so 4% of load-test requests got a wrong 422 even though an outdoor path was ~40 m away. The wider second query only runs in that rare case, so typical requests pay nothing extra. `TestSnapFromInsideBuilding` fails with the old behaviour and passes with the fix.
+**Data limitation noted:** indoor networks are in the graph but mostly unreachable from outside, which is one more reason indoor routing is out of scope (README, "Data coverage").
+
+## 29. Test strategy: fast tests by default, real infrastructure behind a build tag
+**Chose:**
+- **Unit and property tests**, run by `go test ./...` with no Docker needed. They cover the cost model, hazard rules, the overlay including the race stress test, the hub, the rate limiter (on miniredis), and plan() on synthetic graphs.
+- **Real-graph tests from a committed fixture** (`testdata/campus-graph.json.gz`, 593 KB, written by `cmd/exportgraph`): golden routes for 3 campus pairs × 3 profiles (lengths and steps/no-steps pinned to the Day 2 results), A* = Dijkstra on 450 random real queries, and `BenchmarkAStarCampus`. They run anywhere, CI included.
+- **Integration tests** (`go test -tags integration ./integration`): testcontainers starts PostGIS and Redis, applies the goose migrations, and seeds the campus graph. Each test builds two complete API instances sharing them, so the multi-instance paths are exercised for real: the hazard lifecycle across instances (WebSocket delivery, overlay convergence, cache key change, votes, resolve), the expiry worker, gap → resync, rate limits on real Redis, and the stats recorder. Each test starts from a clean slate, and the suite passes `-count=3`.
+- **Load tests:** k6 (`scripts/k6/load.js`).
+
+**Rejected:** using the dev database in tests (state leaks between runs, and it isn't available in CI), and mocking Postgres (the queries that matter, KNN snapping, advisory locks and `RETURNING` CTEs, are exactly what a mock would hide).

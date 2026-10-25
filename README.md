@@ -17,7 +17,9 @@ go run ./cmd/importer         # loads the graph (flags: -ways, -nodes, -db)
 go run ./cmd/route -from 43.4718,-80.5452 -to 43.4685,-80.5418   # SLC -> Hagey Hall, all profiles
 go run ./cmd/bench            # latency / nodes-expanded benchmark
 go run ./cmd/api              # HTTP API on :8080 (flags -addr, -db, -cors; or PORT / DATABASE_URL / CORS_ORIGINS)
-go test -race ./...
+go test -race ./...                                   # unit, property and golden tests (no Docker needed)
+go test -tags integration -race ./integration          # real Postgres+Redis via testcontainers
+k6 run -e RATE=200 scripts/k6/load.js                 # load test (start the API with -rate-limit=false)
 
 cd web && npm install && npm run dev   # map UI on http://localhost:3000
 ```
@@ -77,6 +79,18 @@ The map subscribes to its visible area and to the edges of the route on screen. 
 Measured from a hazard POST to the WebSocket event: p50 6.3 ms and p95 8.4 ms, including the cross-instance trip. In the browser, the toast appeared 40 ms after the report was sent ([`docs/benchmarks/day6-propagation.md`](docs/benchmarks/day6-propagation.md); `go run ./cmd/wsprobe` reproduces it).
 
 `/places?q=` matches UW building codes exactly (`dc`, `slc`, `e7`), matches word prefixes (`dav`), and tolerates typos (`dana portr`).
+
+## Load test (Day 8)
+
+From k6 on an Apple M4, with one API process. Full results are in [`docs/benchmarks/day8.md`](docs/benchmarks/day8.md).
+
+| Scenario | Requests | Failed | p50 | p95 | p99 | Cache hits |
+|---|---|---|---|---|---|---|
+| 200 req/s + a hazard change every second | 12,000 | 0 | 2.78 ms | 4.24 ms | 5.32 ms | 0.9% |
+| 200 req/s, no hazard writes | 12,001 | 0 | | | | 39.6% (hit p95 1.0 ms vs miss 5.0 ms) |
+| 1,000 req/s + hazard changes | 29,996 | 0 | 3.44 ms | 5.62 ms | 12.3 ms | 4.6% |
+
+During the 200 req/s run, a hazard reached a WebSocket client p95 5.5 ms after its POST was sent. Hazard changes invalidate the cache by design: each change moves requests to new keys, so stale routes are never served.
 
 ## Routing performance
 

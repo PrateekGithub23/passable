@@ -57,12 +57,15 @@ return {allowed, retry}
 
 // Limiter checks rules against Redis. A nil *Limiter allows everything.
 type Limiter struct {
-	rdb *redis.Client
-	now func() time.Time // injectable clock for tests
+	rdb     *redis.Client
+	now     func() time.Time // injectable clock for tests
+	timeout time.Duration    // Redis budget per check; past it, the request is allowed
 }
 
 // New returns a limiter backed by rdb.
-func New(rdb *redis.Client) *Limiter { return &Limiter{rdb: rdb, now: time.Now} }
+func New(rdb *redis.Client) *Limiter {
+	return &Limiter{rdb: rdb, now: time.Now, timeout: 50 * time.Millisecond}
+}
 
 // Allow takes one token for key under rule. It returns whether the request may proceed and,
 // if not, how long until a token is available.
@@ -73,7 +76,7 @@ func (l *Limiter) Allow(ctx context.Context, rule Rule, key string) (bool, time.
 	if l == nil || key == "" {
 		return true, 0
 	}
-	ctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(ctx, l.timeout)
 	defer cancel()
 	rate := 1 / float64(rule.Per.Milliseconds()) // tokens per millisecond
 	res, err := tokenBucket.Run(ctx, l.rdb, []string{"rl:" + rule.Name + ":" + key},
