@@ -215,3 +215,15 @@ Refusals are `429` with `Retry-After`. Writes are limited per session *and* per 
 - **Load tests:** k6 (`scripts/k6/load.js`).
 
 **Rejected:** using the dev database in tests (state leaks between runs, and it isn't available in CI), and mocking Postgres (the queries that matter, KNN snapping, advisory locks and `RETURNING` CTEs, are exactly what a mock would hide).
+
+## 30. Deployment on free tiers, with no payment method
+**Chose:** Vercel (frontend), Fly.io trial (API, one always-on machine in `iad`), Neon (Postgres 18 + PostGIS 3.6, us-east-1) and Upstash Redis signed up for directly (us-east-1, TLS). The API's migrations run as Fly's `release_command`, so schema changes land before the new code starts.
+**Rejected:** `fly redis create` (it needs a card on trial organisations), a Fly-hosted Postgres (paid), and Neon's pooled endpoint (PgBouncer in transaction mode breaks pgx's prepared statements, so the API uses the direct endpoint).
+**Why:** the only hard constraint was zero cost with no card on file. Everything sits in or next to US East, so the API's tight Redis budgets (50 ms for cache and rate limits, 500 ms for publish) hold. They did not hold from a laptop in Ontario (Upstash round trip ~42 ms), where the cache and rate limiter correctly failed open; from Fly the cache hits as intended.
+**Verified on production:**
+- health checks pass and the cache hits;
+- a route not in the cache averages 11.6 ms on the server;
+- server-side propagation is 2.2 ms p50;
+- a two-browser test on the live site went from report to "reroute?" prompt in 470 ms, and the reroute avoided the reported path.
+
+**Watch:** the Fly organisation is on a trial plan, so check its limits in the Fly dashboard before relying on the demo staying up.

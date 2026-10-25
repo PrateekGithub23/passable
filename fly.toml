@@ -18,8 +18,8 @@ primary_region = "iad"            # US East, next to Neon's us-east-1
   # Expiry + missed-event catch-up cadence. Longer than the 30 s default so a free-tier
   # Postgres that suspends when idle isn't woken every 30 s; TTLs are hours, so 10 min is fine.
   EXPIRY_INTERVAL = "10m"
-  # Overwritten with the Vercel URL after the frontend is deployed.
-  CORS_ORIGINS = "http://localhost:3000"
+  # Browser origins allowed to call the API: the production site, plus local development.
+  CORS_ORIGINS = "https://passable-alpha.vercel.app,http://localhost:3000"
   # Secrets (set with `fly secrets set`, never committed): DATABASE_URL, REDIS_URL
 
 [http_service]
