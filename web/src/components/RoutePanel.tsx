@@ -60,7 +60,10 @@ export default function RoutePanel({ profile, onProfileChange, hasStart, hasEnd,
       {route && <RouteSummary route={route} />}
 
       {/* Small footer links, pushed to the bottom of the panel. */}
-      <footer className="mt-auto pt-4 text-xs text-gray-500">
+      <footer className="mt-auto flex gap-3 pt-4 text-xs text-gray-500">
+        <Link href="/about" className="hover:underline">
+          About &amp; limitations
+        </Link>
         <Link href="/status" className="hover:underline">
           Status
         </Link>
