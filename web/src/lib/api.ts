@@ -99,3 +99,32 @@ export async function fetchRoute(
   }
   return body as RouteResponse;
 }
+
+/** A hazard report (GET /api/v1/hazards, and the payload of live WebSocket events). */
+export interface Hazard {
+  id: number;
+  edge_id: number;
+  type: HazardType;
+  severity: "minor" | "major";
+  status: HazardStatus;
+  note?: string;
+  point: LngLat;
+  confirm_count: number;
+  resolve_count: number;
+  created_at: string;
+  expires_at: string;
+}
+
+/** [west, south, east, north] */
+export type BBox = [number, number, number, number];
+
+/** Live (active or confirmed) hazards inside bbox, plus the graph version the list reflects. */
+export async function fetchHazards(bbox: BBox, signal?: AbortSignal): Promise<{ hazards: Hazard[]; graph_version: number }> {
+  const res = await fetch(`${API_URL}/api/v1/hazards?bbox=${bbox.join(",")}`, { signal });
+  const body = await res.json();
+  if (!res.ok) throw new ApiError(body.error ?? `Request failed (${res.status})`);
+  return body;
+}
+
+/** WebSocket endpoint: same host as the API, ws:// or wss:// instead of http:// or https://. */
+export const WS_URL = API_URL.replace(/^http/, "ws") + "/ws";

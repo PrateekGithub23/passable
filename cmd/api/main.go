@@ -21,6 +21,7 @@ import (
 	"github.com/PrateekGithub23/passable/internal/api"
 	"github.com/PrateekGithub23/passable/internal/cache"
 	"github.com/PrateekGithub23/passable/internal/graph"
+	"github.com/PrateekGithub23/passable/internal/live"
 	"github.com/PrateekGithub23/passable/internal/overlay"
 	"github.com/PrateekGithub23/passable/internal/reports"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -65,28 +66,65 @@ func main() {
 		log.Fatalf("load hazards: %v", err)
 	}
 	log.Printf("hazard overlay: version %d, %d live hazards", holder.Load().Seq, holder.Load().Len())
-	go svc.RunExpiry(ctx, *expiryEvery) // background worker; stops when ctx is cancelled
 
-	// Route cache in Redis. Optional: if Redis is unreachable, run without a cache.
+	origins := strings.Split(*cors, ",")
+	hub := live.NewHub(origins, func() int64 { return holder.Load().Seq })
+
+	// Redis: route cache + cross-instance event bus. Optional: without Redis, this instance
+	// runs alone (no cache, and events only reach its own WebSocket clients).
 	var routeCache *cache.RouteCache
+	var bus *live.Bus
 	if *redisURL != "" {
 		opts, err := redis.ParseURL(*redisURL)
 		if err != nil {
 			log.Fatalf("redis url: %v", err)
 		}
+		// Without this, go-redis ignores context deadlines and falls back to its own
+		// multi-second timeouts and retries; the cache's 50 ms and the publish's 500 ms
+		// budgets would have no effect.
+		opts.ContextTimeoutEnabled = true
 		rdb := redis.NewClient(opts)
 		if err := rdb.Ping(ctx).Err(); err != nil {
-			log.Printf("redis unavailable (%v); running without route cache", err)
+			log.Printf("redis unavailable (%v); running without route cache or event bus", err)
+		} else if bus, err = live.NewBus(ctx, rdb); err != nil {
+			log.Printf("redis subscribe failed (%v); running without event bus", err)
+			routeCache = cache.New(rdb, 10*time.Minute)
 		} else {
 			routeCache = cache.New(rdb, 10*time.Minute)
-			log.Printf("route cache: redis %s", opts.Addr)
+			log.Printf("route cache + event bus: redis %s", opts.Addr)
 		}
 	}
 
-	srv := api.New(api.Config{DB: pool, Graph: g, Overlay: holder, Reports: svc, Cache: routeCache})
+	// How a committed hazard change travels:
+	//   with Redis:    writer commits -> publish -> every instance's bus.Run -> apply + push to its clients
+	//   without Redis: writer commits -> push to this instance's clients (already applied locally)
+	if bus != nil {
+		svc.OnCommit = func(ch reports.Change) {
+			// This runs inside the hazard POST, after the commit. Bound it tightly: if Redis is
+			// down, the writer shouldn't wait on retries. Peers recover from Postgres anyway
+			// (gap detection / periodic catch-up), so a lost publish only delays them.
+			pctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+			defer cancel()
+			if err := bus.Publish(pctx, ch); err != nil {
+				log.Printf("publish failed (%v); notifying local clients only", err)
+				hub.Broadcast(ch)
+			}
+		}
+		go bus.Run(ctx, func(ch reports.Change) {
+			svc.ApplyChange(ctx, ch) // no-op for changes this instance wrote itself
+			hub.Broadcast(ch)
+		})
+	} else {
+		svc.OnCommit = hub.Broadcast
+	}
+
+	// Start the expiry worker only now: it reads svc.OnCommit, which must be set first.
+	go svc.RunExpiry(ctx, *expiryEvery) // background worker; stops when ctx is cancelled
+
+	srv := api.New(api.Config{DB: pool, Graph: g, Overlay: holder, Reports: svc, Cache: routeCache, Live: hub})
 
 	// Timeouts stop slow or stuck clients from holding connections open forever.
-	hs := &http.Server{Addr: *addr, Handler: api.WithCORS(srv, strings.Split(*cors, ",")), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}
+	hs := &http.Server{Addr: *addr, Handler: api.WithCORS(srv, origins), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}
 	// Graceful shutdown: on signal, stop accepting new connections and give in-flight
 	// requests up to 5 s to finish.
 	go func() {

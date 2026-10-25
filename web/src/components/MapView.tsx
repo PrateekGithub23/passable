@@ -1,7 +1,7 @@
 "use client";
 
-// MapView: the MapLibre map. It draws the start/end markers and the route, and reports
-// clicks to the parent (Planner), which owns all state. MapView itself holds no app state;
+// MapView: the MapLibre map. It draws the start/end markers, the route and live hazard
+// markers, and reports clicks and the visible area to the parent (Planner), which owns all state. MapView itself holds no app state;
 // it only mirrors the props it gets onto the imperative MapLibre API.
 //
 // Why MapLibre is loaded with a dynamic import inside useEffect: MapLibre touches `window`
@@ -9,11 +9,11 @@
 // exists. Importing it inside the effect means it only ever loads in the browser.
 
 import { useEffect, useRef, useState } from "react";
-import type { GeoJSONSource, Map as MapLibreMap, Marker } from "maplibre-gl";
+import type { GeoJSONSource, Map as MapLibreMap, Marker, Popup } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import type { LngLat, RouteResponse } from "@/lib/api";
-import { BLOCKED_COLOR, CONFIDENCE_COLOR } from "@/lib/style";
+import type { BBox, Hazard, LngLat, RouteResponse } from "@/lib/api";
+import { BLOCKED_COLOR, CONFIDENCE_COLOR, HAZARD_STYLE } from "@/lib/style";
 
 // Free OpenStreetMap vector basemap; no API key needed (https://openfreemap.org).
 const BASEMAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
@@ -29,24 +29,31 @@ interface Props {
   start?: LngLat;
   end?: LngLat;
   route?: RouteResponse;
+  hazards: Hazard[];
   onMapClick: (point: LngLat) => void;
+  onViewportChange: (bbox: BBox) => void;
 }
 
-export default function MapView({ start, end, route, onMapClick }: Props) {
+export default function MapView({ start, end, route, hazards, onMapClick, onViewportChange }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<{ start?: Marker; end?: Marker }>({});
   // The Marker class arrives with the dynamic import, so keep a handle to it for later effects.
   const markerClassRef = useRef<typeof Marker | null>(null);
+  const popupClassRef = useRef<typeof Popup | null>(null);
+  // Hazards by id, so a click on a marker can show the full report in a popup.
+  const hazardsByIdRef = useRef<Map<number, Hazard>>(new Map());
   // Sources and layers can only be added once the style has loaded; effects wait on this.
   const [ready, setReady] = useState(false);
 
   // Keep the latest click handler in a ref. The map's click listener is registered once, and
   // reading the ref (instead of capturing `onMapClick`) avoids calling a stale handler.
   const onClickRef = useRef(onMapClick);
+  const onViewportRef = useRef(onViewportChange);
   useEffect(() => {
     onClickRef.current = onMapClick;
-  }, [onMapClick]);
+    onViewportRef.current = onViewportChange;
+  }, [onMapClick, onViewportChange]);
 
   // 1) Create the map once, on mount; destroy it on unmount.
   useEffect(() => {
@@ -60,6 +67,7 @@ export default function MapView({ start, end, route, onMapClick }: Props) {
       // `predev`/`prebuild` npm scripts, because bundlers cannot discover it on their own.
       maplibre.setWorkerUrl("/maplibre-gl-worker.mjs");
       markerClassRef.current = maplibre.Marker;
+      popupClassRef.current = maplibre.Popup;
 
       map = new maplibre.Map({
         container: containerRef.current,
@@ -69,13 +77,36 @@ export default function MapView({ start, end, route, onMapClick }: Props) {
         maxBounds: CAMERA_LIMIT,
       });
       map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
-      map.on("click", (e) => onClickRef.current([e.lngLat.lng, e.lngLat.lat]));
+      map.on("click", (e) => {
+        if (!map) return;
+        // A click on a hazard marker opens its details instead of setting a route point.
+        const hit = map.getLayer("hazards") ? map.queryRenderedFeatures(e.point, { layers: ["hazards"] }) : [];
+        const h = hit.length > 0 ? hazardsByIdRef.current.get(hit[0].properties.id) : undefined;
+        if (h && popupClassRef.current) {
+          new popupClassRef.current({ offset: 10 }).setLngLat(h.point).setDOMContent(hazardPopup(h)).addTo(map);
+          return;
+        }
+        onClickRef.current([e.lngLat.lng, e.lngLat.lat]);
+      });
+
+      // Report the visible area after every pan/zoom (moveend fires once per gesture, not per
+      // frame), so the parent can subscribe to hazards in exactly this area.
+      const reportViewport = () => {
+        if (!map) return;
+        const b = map.getBounds();
+        onViewportRef.current([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+      };
+      map.on("moveend", reportViewport);
 
       map.on("load", () => {
         if (!map) return;
         addRouteLayers(map);
+        // Pointer cursor over hazard markers, so they read as clickable.
+        map.on("mouseenter", "hazards", () => (map!.getCanvas().style.cursor = "pointer"));
+        map.on("mouseleave", "hazards", () => (map!.getCanvas().style.cursor = ""));
         mapRef.current = map;
         setReady(true);
+        reportViewport();
       });
     })();
 
@@ -175,7 +206,41 @@ export default function MapView({ start, end, route, onMapClick }: Props) {
     });
   }, [ready, route, start, end]);
 
+  // 5) Live hazards -> circle markers, coloured by type; confirmed reports drawn larger.
+  useEffect(() => {
+    const map = mapRef.current;
+    hazardsByIdRef.current = new Map(hazards.map((h) => [h.id, h]));
+    if (!ready || !map) return;
+    map.getSource<GeoJSONSource>("hazards")?.setData({
+      type: "FeatureCollection",
+      features: hazards.map((h) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: h.point },
+        properties: { id: h.id, color: HAZARD_STYLE[h.type].color, confirmed: h.status === "confirmed" },
+      })),
+    });
+  }, [ready, hazards]);
+
   return <div ref={containerRef} className="h-full w-full" aria-label="Map. Click to set start and destination." />;
+}
+
+// hazardPopup builds the popup content with DOM nodes and textContent rather than an HTML
+// string: the note is user-written text, and textContent can never be interpreted as HTML
+// (no script injection through a hazard note).
+function hazardPopup(h: Hazard): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "text-sm";
+  const add = (tag: string, text: string, className = "") => {
+    const node = document.createElement(tag);
+    node.textContent = text;
+    node.className = className;
+    el.appendChild(node);
+  };
+  add("p", HAZARD_STYLE[h.type].label, "font-semibold text-gray-900");
+  if (h.note) add("p", `“${h.note}”`, "text-gray-700");
+  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(h.created_at)) / 60000));
+  add("p", `${h.status === "confirmed" ? "Confirmed" : "Reported"} · ${minutes} min ago · ${h.confirm_count} confirmation(s)`, "text-xs text-gray-500");
+  return el;
 }
 
 // Register the empty sources and the layers that draw them. Later updates only call
@@ -185,6 +250,7 @@ function addRouteLayers(map: MapLibreMap) {
   map.addSource("route", { type: "geojson", data: empty });
   map.addSource("barriers", { type: "geojson", data: empty });
   map.addSource("snap-connectors", { type: "geojson", data: empty });
+  map.addSource("hazards", { type: "geojson", data: empty });
   map.addSource("service-area", {
     type: "geojson",
     data: {
@@ -243,6 +309,18 @@ function addRouteLayers(map: MapLibreMap) {
     filter: ["==", ["get", "dashed"], true],
     layout: { "line-join": "round" },
     paint: { "line-color": ["get", "color"], "line-width": 5, "line-dasharray": [1.5, 1] },
+  });
+  // Hazard markers go on top of the route so they stay clickable where they overlap it.
+  map.addLayer({
+    id: "hazards",
+    type: "circle",
+    source: "hazards",
+    paint: {
+      "circle-radius": ["case", ["get", "confirmed"], 9, 7],
+      "circle-color": ["get", "color"],
+      "circle-stroke-color": "#ffffff",
+      "circle-stroke-width": 2,
+    },
   });
   map.addLayer({
     id: "barriers",

@@ -65,12 +65,25 @@ func scanReport(row pgx.Row) (Report, error) {
 	return r, err
 }
 
+// Change is one committed hazard event: what is published to other instances (Redis) and
+// pushed to browsers (WebSocket). It carries the report's full new state.
+type Change struct {
+	Seq    int64  `json:"seq"`
+	Kind   string `json:"kind"` // created | updated | resolved | expired
+	Report Report `json:"report"`
+}
+
 // Service owns report persistence and overlay updates.
 type Service struct {
 	db      *pgxpool.Pool
 	g       *graph.Graph
 	overlay *overlay.Holder
 	now     func() time.Time // injectable clock
+
+	// OnCommit, if set, is called once for every committed change, after it has been applied
+	// to this instance's overlay. main wires it to "publish to Redis" (or, without Redis, to
+	// "notify local WebSocket clients"). Set it before serving traffic.
+	OnCommit func(Change)
 }
 
 // New creates the service. Call Resync before serving traffic.
@@ -244,8 +257,24 @@ func (s *Service) write(ctx context.Context, fn func(tx pgx.Tx) (Report, string,
 	if err := tx.Commit(ctx); err != nil {
 		return Report{}, err
 	}
-	s.apply(ctx, seq, r)
+	s.committed(ctx, Change{Seq: seq, Kind: event, Report: r})
 	return r, nil
+}
+
+// committed handles a change this instance just committed: apply it locally first (so the
+// writer's very next route request already sees it: read-your-writes), then hand it to
+// OnCommit for fan-out.
+func (s *Service) committed(ctx context.Context, ch Change) {
+	s.ApplyChange(ctx, ch)
+	if s.OnCommit != nil {
+		s.OnCommit(ch)
+	}
+}
+
+// ApplyChange applies a change (local, or received from another instance) to the overlay.
+// Safe to call more than once per change: already-applied events are ignored.
+func (s *Service) ApplyChange(ctx context.Context, ch Change) {
+	s.apply(ctx, ch.Seq, ch.Report)
 }
 
 // apply pushes one committed change into the overlay, resyncing from Postgres on a gap.
@@ -350,13 +379,19 @@ func (s *Service) ExpireDue(ctx context.Context) (int, error) {
 	// RETURNING order isn't guaranteed to follow seq; the overlay needs seq order.
 	slices.SortFunc(evs, func(a, b expiredEvent) int { return cmp.Compare(a.seq, b.seq) })
 	for _, e := range evs {
-		// Expired = not live, so applying removes the hazard; type/severity don't matter.
-		s.apply(ctx, e.seq, Report{ID: e.id, EdgeID: e.edgeID, Status: hazard.Expired})
+		// Read the full row back so browsers get a complete report (point, type, ...).
+		// Falls back to the minimal state if the read fails: the overlay only needs
+		// id + edge + "not live" to remove the hazard.
+		r, err := scanReport(s.db.QueryRow(ctx, `SELECT `+reportCols+` FROM hazard_reports WHERE id = $1`, e.id))
+		if err != nil {
+			r = Report{ID: e.id, EdgeID: e.edgeID, Status: hazard.Expired}
+		}
+		s.committed(ctx, Change{Seq: e.seq, Kind: "expired", Report: r})
 	}
 	return len(evs), nil
 }
 
-// RunExpiry calls ExpireDue every interval until ctx is cancelled. Several instances can run
+// RunExpiry calls ExpireDue (and a catch-up check) every interval until ctx is cancelled. Several instances can run
 // it at once: the advisory lock plus "WHERE status IN (live)" means each report expires once.
 func (s *Service) RunExpiry(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
@@ -369,11 +404,26 @@ func (s *Service) RunExpiry(ctx context.Context, every time.Duration) {
 		} else if n > 0 {
 			log.Printf("reports: expired %d report(s)", n)
 		}
+		s.catchUp(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// catchUp resyncs if Postgres has events this instance never received. Redis pub/sub drops
+// messages while a subscriber is disconnected, and a dropped *last* event would otherwise go
+// unnoticed (gap detection only fires when a later event arrives).
+func (s *Service) catchUp(ctx context.Context) {
+	var latest int64
+	if err := s.db.QueryRow(ctx, `SELECT coalesce(max(seq), 0) FROM hazard_events`).Scan(&latest); err != nil {
+		return
+	}
+	if latest > s.overlay.Load().Seq {
+		log.Printf("reports: overlay at %d but log at %d; resyncing", s.overlay.Load().Seq, latest)
+		s.resyncOrLog(ctx)
 	}
 }
 

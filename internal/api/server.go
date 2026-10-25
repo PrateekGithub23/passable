@@ -2,7 +2,7 @@
 //
 // Files: server.go (setup, shared helpers), route.go (GET /api/v1/route), places.go
 // (GET /api/v1/places), hazards.go (sessions, hazard reports, graph version), cors.go
-// (cross-origin middleware).
+// (cross-origin middleware). The WebSocket endpoint GET /ws is served by package live.
 package api
 
 import (
@@ -15,6 +15,7 @@ import (
 	"github.com/PrateekGithub23/passable/internal/cache"
 	"github.com/PrateekGithub23/passable/internal/cost"
 	"github.com/PrateekGithub23/passable/internal/graph"
+	"github.com/PrateekGithub23/passable/internal/live"
 	"github.com/PrateekGithub23/passable/internal/overlay"
 	"github.com/PrateekGithub23/passable/internal/reports"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,6 +29,7 @@ type Config struct {
 	Overlay *overlay.Holder
 	Reports *reports.Service
 	Cache   *cache.RouteCache
+	Live    *live.Hub // WebSocket hub; nil disables GET /ws
 }
 
 // Server holds the graph and per-profile base costs (read-only after New) and the live hazard
@@ -90,6 +92,9 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("POST /api/v1/hazards", s.handleCreateHazard)
 	s.mux.HandleFunc("POST /api/v1/hazards/{id}/confirm", s.handleVote(reports.Confirm))
 	s.mux.HandleFunc("POST /api/v1/hazards/{id}/resolve", s.handleVote(reports.Resolve))
+	if cfg.Live != nil {
+		s.mux.HandleFunc("GET /ws", cfg.Live.ServeWS)
+	}
 	return s
 }
 
