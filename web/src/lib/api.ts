@@ -27,8 +27,19 @@ export interface Segment {
   confidence: Confidence;
   penalties?: string[]; // factors that raised the cost, e.g. "surface unknown"
   blocked?: boolean; // only true on "no accessible route" responses
+  hazards?: HazardRef[]; // live hazard reports on this segment
   edge_ids: number[];
   coordinates: LngLat[];
+}
+
+export type HazardType = "elevator_out" | "blocked_sidewalk" | "construction" | "ice_snow" | "missing_curb_ramp";
+export type HazardStatus = "active" | "confirmed" | "resolved" | "expired";
+
+/** A live hazard report affecting a route segment. */
+export interface HazardRef {
+  id: number;
+  type: HazardType;
+  status: HazardStatus;
 }
 
 /** Something on the route this profile cannot pass (steps for a wheelchair, ...). */
@@ -48,6 +59,7 @@ export interface SnapInfo {
 
 export interface RouteResponse {
   profile: Profile;
+  graph_version: number; // hazard event sequence the route was computed at; bumps on every hazard change
   accessible: boolean; // false => the route shown crosses `barriers`
   distance_m: number;
   cost?: number;

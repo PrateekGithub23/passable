@@ -24,11 +24,13 @@ func WithCORS(h http.Handler, origins []string) http.Handler {
 		// reports later), the browser sends OPTIONS to ask which methods and headers are allowed.
 		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Session-ID")
 			w.Header().Set("Access-Control-Max-Age", "600") // let the browser cache the preflight for 10 min
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		// Let browser JS read our custom response headers (cache status, graph version).
+		w.Header().Set("Access-Control-Expose-Headers", "X-Cache, X-Graph-Version")
 		h.ServeHTTP(w, r)
 	})
 }

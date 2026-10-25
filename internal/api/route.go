@@ -4,13 +4,16 @@ package api
 //
 // Request flow:
 //  1. parse and validate the query (handleRoute)
-//  2. find candidate edges near each point with a PostGIS KNN query (candidates)
-//  3. choose snap points the profile can use and run A* between them (plan)
-//  4. if that fails, run A* on the "relaxed" costs to find the fewest-barrier route (plan)
-//  5. turn the path into merged, labelled segments and plain-language notes (buildResponse)
+//  2. load ONE overlay snapshot for the whole request and check the route cache (key includes
+//     the snapshot's version, so a hazard change means a new key)
+//  3. find candidate edges near each point with a PostGIS KNN query (candidates)
+//  4. choose snap points the profile can use and run A* between them (plan)
+//  5. if that fails, run A* on the "relaxed" costs to find the fewest-barrier route (plan)
+//  6. turn the path into merged, labelled segments and plain-language notes (buildResponse)
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -20,8 +23,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PrateekGithub23/passable/internal/cache"
 	"github.com/PrateekGithub23/passable/internal/cost"
 	"github.com/PrateekGithub23/passable/internal/graph"
+	"github.com/PrateekGithub23/passable/internal/hazard"
 	"github.com/PrateekGithub23/passable/internal/route"
 	"github.com/jackc/pgx/v5"
 )
@@ -37,6 +42,7 @@ const bboxS, bboxW, bboxN, bboxE = 43.455, -80.565, 43.485, -80.505
 // routeResponse is the JSON body of a successful /route call (mirrored in web/src/lib/api.ts).
 type routeResponse struct {
 	Profile       cost.Profile                `json:"profile"`
+	GraphVersion  int64                       `json:"graph_version"` // hazard event seq the route was computed at
 	Accessible    bool                        `json:"accessible"`
 	DistanceM     float64                     `json:"distance_m"`
 	Cost          float64                     `json:"cost,omitempty"` // omitted when not accessible
@@ -73,9 +79,17 @@ type segment struct {
 	Confidence  cost.Confidence `json:"confidence"`
 	Penalties   []string        `json:"penalties,omitempty"`
 	Blocked     bool            `json:"blocked,omitempty"`
+	Hazards     []hazardRef     `json:"hazards,omitempty"` // live reports on this segment
 	EdgeIDs     []int64         `json:"edge_ids"`
 	Coordinates [][2]float64    `json:"coordinates"` // [lon, lat], GeoJSON order
 	key         string          // unexported: the merge key, never sent to clients
+}
+
+// hazardRef points at a live report affecting a segment.
+type hazardRef struct {
+	ID     int64         `json:"id"`
+	Type   hazard.Type   `json:"type"`
+	Status hazard.Status `json:"status"`
 }
 
 // barrier is a blocked segment on a "no accessible route" response.
@@ -118,6 +132,18 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// The one snapshot load for this request: cache key, snapping and search all use it.
+	v := s.view(profile)
+	key := cache.RouteKey(v.snap.Seq, string(profile), from.Lat, from.Lon, to.Lat, to.Lon)
+	w.Header().Set("X-Graph-Version", strconv.FormatInt(v.snap.Seq, 10))
+	if body, ok := s.cache.Get(r.Context(), key); ok {
+		w.Header().Set("X-Cache", "HIT")
+		writeRawJSON(w, body)
+		return
+	}
+	w.Header().Set("X-Cache", "MISS")
+
 	// r.Context() is cancelled if the client disconnects, which aborts the DB queries too.
 	candFrom, err := s.candidates(r.Context(), from)
 	if err != nil {
@@ -129,19 +155,30 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "snap failed")
 		return
 	}
-	resp, status, msg := s.plan(profile, candFrom, candTo)
+	resp, status, msg := s.plan(v, candFrom, candTo)
 	if status != http.StatusOK {
 		writeError(w, status, msg)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	body, err := json.Marshal(resp)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "encoding failed")
+		return
+	}
+	s.cache.Set(r.Context(), key, body)
+	writeRawJSON(w, body)
+}
+
+// writeRawJSON sends an already-encoded JSON body with status 200.
+func writeRawJSON(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
 }
 
 // plan picks snap points from the candidates and routes between them. When no fully
 // accessible route exists it returns the route with the fewest barriers, naming them.
-func (s *Server) plan(profile cost.Profile, candFrom, candTo []candidate) (routeResponse, int, string) {
-	ps := s.profiles[profile]
-
+func (s *Server) plan(v view, candFrom, candTo []candidate) (routeResponse, int, string) {
 	// Nearest edge on the main network regardless of profile. If even this doesn't exist
 	// within maxSnapM, the point is simply too far from any mapped path.
 	inAny := func(ei int32) bool { return s.anyComp[s.g.Edges[ei].From] == s.anyMain }
@@ -153,19 +190,18 @@ func (s *Server) plan(profile cost.Profile, candFrom, candTo []candidate) (route
 	}
 
 	// Nearest edge this profile can actually use (may be farther than anyFrom/anyTo).
-	usable := func(ei int32) bool { return ps.usable(s.g, ei) }
-	useFrom, uFrom := best(candFrom, usable)
-	useTo, uTo := best(candTo, usable)
+	useFrom, uFrom := best(candFrom, v.usable)
+	useTo, uTo := best(candTo, v.usable)
 
 	// Happy path: both ends snap to usable edges, run A* on the real costs.
 	if uFrom && uTo {
 		start := time.Now()
-		path, err := route.AStarPoints(s.g, func(e int32) float64 { return ps.table[e] }, useFrom.endpoint(), useTo.endpoint())
+		path, err := route.AStarPoints(s.g, v.cost, useFrom.endpoint(), useTo.endpoint())
 		elapsed := time.Since(start)
 		if err == nil {
-			resp := s.buildResponse(profile, path, useFrom, useTo, elapsed, true)
+			resp := s.buildResponse(v, path, useFrom, useTo, elapsed, true)
 			// Snap notes first (they explain where the route starts), then the route's notes.
-			notes := append(s.snapNotes(profile, "start", anyFrom, useFrom), s.snapNotes(profile, "destination", anyTo, useTo)...)
+			notes := append(s.snapNotes(v, "start", anyFrom, useFrom), s.snapNotes(v, "destination", anyTo, useTo)...)
 			resp.Notes = append(notes, resp.Notes...)
 			if resp.Notes == nil {
 				resp.Notes = []string{} // JSON [] rather than null, so clients can always iterate
@@ -181,12 +217,12 @@ func (s *Server) plan(profile cost.Profile, candFrom, candTo []candidate) (route
 	// Fallback: no fully accessible route. Route between the nearest edges on the relaxed
 	// costs (barriers allowed but very expensive); buildResponse marks the barriers it used.
 	start := time.Now()
-	path, err := route.AStarPoints(s.g, func(e int32) float64 { return ps.relaxed[e] }, anyFrom.endpoint(), anyTo.endpoint())
+	path, err := route.AStarPoints(s.g, v.relaxed, anyFrom.endpoint(), anyTo.endpoint())
 	elapsed := time.Since(start)
 	if err != nil {
 		return routeResponse{}, http.StatusInternalServerError, "routing failed"
 	}
-	return s.buildResponse(profile, path, anyFrom, anyTo, elapsed, false), http.StatusOK, ""
+	return s.buildResponse(v, path, anyFrom, anyTo, elapsed, false), http.StatusOK, ""
 }
 
 // candidates fetches the nearest edges by GiST KNN and re-ranks them by exact distance in meters.
@@ -234,7 +270,7 @@ func best(cands []candidate, ok func(int32) bool) (candidate, bool) {
 }
 
 // snapNotes explains when the nearest path could not be used and the route starts farther away.
-func (s *Server) snapNotes(p cost.Profile, which string, nearest, used candidate) []string {
+func (s *Server) snapNotes(v view, which string, nearest, used candidate) []string {
 	// Same edge, or less than 5 m difference: nothing worth mentioning.
 	if nearest.edge == used.edge || used.distM-nearest.distM < 5 {
 		return nil
@@ -243,18 +279,38 @@ func (s *Server) snapNotes(p cost.Profile, which string, nearest, used candidate
 	// Either the nearest edge itself is blocked (steps, ...) or it is passable but inside an
 	// isolated pocket.
 	why := "is not connected to the rest of the usable network"
-	if r := cost.Evaluate(p, e); r.Blocked {
+	if r, _ := v.evaluate(nearest.edge); r.Blocked {
 		why = "has " + strings.Join(r.Reasons, ", ")
 	}
 	return []string{fmt.Sprintf("The nearest path to the %s (%s, %.0f m away) %s for %s; the route uses a path %.0f m away instead.",
-		which, strings.ToLower(describe(e)), nearest.distM, why, p, used.distM)}
+		which, strings.ToLower(describe(e)), nearest.distM, why, v.p, used.distM)}
+}
+
+// evaluate explains edge ei under this view: the tag-based cost.Evaluate result, plus every
+// live hazard on the edge (as a reason, and as a block if it blocks this profile).
+func (v view) evaluate(ei int32) (cost.Result, []hazardRef) {
+	r := cost.Evaluate(v.p, &v.g.Edges[ei])
+	var refs []hazardRef
+	for _, h := range v.snap.HazardsOn(ei) {
+		refs = append(refs, hazardRef{ID: h.ID, Type: h.Type, Status: h.Status})
+		ef := hazard.EffectOn(h.Type, h.Severity, v.p)
+		if ef.Block || ef.Mult > 1 {
+			r.Reasons = append(r.Reasons, fmt.Sprintf("reported %s (#%d)", strings.ReplaceAll(string(h.Type), "_", " "), h.ID))
+		}
+		if ef.Block {
+			r.Blocked = true
+		}
+	}
+	return r, refs
 }
 
 // buildResponse turns a raw path (edge indices) into what a person can read: merged segments
 // with geometry, confidence totals, barriers and notes.
-func (s *Server) buildResponse(p cost.Profile, path route.Path, a, b candidate, elapsed time.Duration, accessible bool) routeResponse {
+func (s *Server) buildResponse(v view, path route.Path, a, b candidate, elapsed time.Duration, accessible bool) routeResponse {
+	p := v.p
 	resp := routeResponse{
 		Profile:       p,
+		GraphVersion:  v.snap.Seq,
 		Accessible:    accessible,
 		DistanceM:     round1(path.LengthM),
 		NodesExpanded: path.Expanded,
@@ -275,7 +331,7 @@ func (s *Server) buildResponse(p cost.Profile, path route.Path, a, b candidate, 
 	// Walk the route piece by piece (partial first/last edges included).
 	for _, pc := range pieces(s.g, path, a.endpoint(), b.endpoint()) {
 		e := &s.g.Edges[pc.edge]
-		ev := cost.Evaluate(p, e) // re-evaluate to get reasons + confidence (the table only stores numbers)
+		ev, hz := v.evaluate(pc.edge) // re-evaluate to get reasons + confidence (the tables only store numbers)
 		length := math.Abs(pc.f1-pc.f0) * e.LengthM
 		resp.ConfidenceM[ev.Confidence] += length
 		kerb := kerbLabel(e)
@@ -289,7 +345,7 @@ func (s *Server) buildResponse(p cost.Profile, path route.Path, a, b candidate, 
 		}
 		// Merge with the previous segment if everything a user would see is identical.
 		key := strings.Join([]string{describe(e), e.Name, e.Surface, kerb, string(ev.Confidence),
-			strings.Join(ev.Reasons, ","), strconv.FormatBool(ev.Blocked)}, "|")
+			strings.Join(ev.Reasons, ","), strconv.FormatBool(ev.Blocked), fmt.Sprint(hz)}, "|")
 		if n := len(resp.Segments); n > 0 && resp.Segments[n-1].key == key {
 			last := &resp.Segments[n-1]
 			last.LengthM += length
@@ -300,7 +356,7 @@ func (s *Server) buildResponse(p cost.Profile, path route.Path, a, b candidate, 
 		resp.Segments = append(resp.Segments, segment{
 			Description: describe(e), Name: e.Name, Highway: e.Highway, Surface: e.Surface, Kerb: kerb,
 			LengthM: length, Confidence: ev.Confidence, Penalties: ev.Reasons, Blocked: ev.Blocked,
-			EdgeIDs: []int64{e.ID}, Coordinates: coords, key: key,
+			Hazards: hz, EdgeIDs: []int64{e.ID}, Coordinates: coords, key: key,
 		})
 	}
 	// Second pass: round lengths for display and collect blocked segments as barriers.
@@ -414,7 +470,13 @@ func parseLatLng(s string) (graph.Point, error) {
 	if lat < bboxS || lat > bboxN || lng < bboxW || lng > bboxE {
 		return graph.Point{}, fmt.Errorf("outside the service area (%g,%g,%g,%g)", bboxS, bboxW, bboxN, bboxE)
 	}
-	return graph.Point{Lat: lat, Lon: lng}, nil
+	// Round to 5 decimals (~1 m). Routing then uses exactly the coordinates in the cache key,
+	// and nearby clicks share cache entries.
+	return graph.Point{Lat: round5(lat), Lon: round5(lng)}, nil
+}
+
+func round5(x float64) float64 {
+	return math.Round(x*1e5) / 1e5
 }
 
 // round1 rounds to 0.1 (decimetres are plenty for walking distances).

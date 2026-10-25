@@ -1,6 +1,9 @@
 // Command bench measures A* latency and search effort on random queries over the real graph.
 //
-//	go run ./cmd/bench [-n 2000] [-seed 42]
+//	go run ./cmd/bench [-n 2000] [-seed 42] [-hazards 50]
+//
+// -hazards N places N random hazards (half blocked sidewalks, half ice) on the overlay, so the
+// numbers include the cost of the copy-on-write overlay lookup on the routing hot path.
 package main
 
 import (
@@ -17,6 +20,8 @@ import (
 	"github.com/PrateekGithub23/passable/internal/cost"
 	"github.com/PrateekGithub23/passable/internal/geo"
 	"github.com/PrateekGithub23/passable/internal/graph"
+	"github.com/PrateekGithub23/passable/internal/hazard"
+	"github.com/PrateekGithub23/passable/internal/overlay"
 	"github.com/PrateekGithub23/passable/internal/route"
 	"github.com/jackc/pgx/v5"
 )
@@ -25,6 +30,7 @@ func main() {
 	dbURL := flag.String("db", "postgres://passable:passable@localhost:5433/passable", "Postgres connection URL")
 	n := flag.Int("n", 2000, "queries per profile")
 	seed := flag.Int64("seed", 42, "random seed for query pairs")
+	nHazards := flag.Int("hazards", 0, "random live hazards to place on the overlay")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -47,7 +53,19 @@ func main() {
 	fmt.Printf("go %s %s/%s, %d CPUs\n", runtime.Version(), runtime.GOOS, runtime.GOARCH, runtime.NumCPU())
 	fmt.Printf("graph: %d nodes, %d edges, load %s, heap %.1f MiB\n",
 		len(g.Nodes), len(g.Edges), loadTime.Round(time.Millisecond), float64(graphBytes)/(1<<20))
-	fmt.Printf("queries: %d per profile, random node pairs in the profile's usable network, seed %d\n\n", *n, *seed)
+	// Random hazards, from their own seeded generator so query pairs stay identical across
+	// runs with different -hazards values.
+	var live []overlay.Hazard
+	hr := rand.New(rand.NewSource(*seed + 1))
+	for i := 0; i < *nHazards; i++ {
+		h := overlay.Hazard{ID: int64(i + 1), Edge: int32(hr.Intn(len(g.Edges))), Type: hazard.BlockedSidewalk, Severity: hazard.Major, Status: hazard.Active}
+		if i%2 == 1 {
+			h.Type, h.Severity = hazard.IceSnow, hazard.Minor
+		}
+		live = append(live, h)
+	}
+	snap := overlay.Build(1, live)
+	fmt.Printf("queries: %d per profile, random node pairs in the profile's usable network, seed %d, %d live hazards\n\n", *n, *seed, snap.Len())
 	fmt.Printf("%-12s %8s %8s %8s %8s | %9s %9s | %9s %9s\n",
 		"profile", "p50", "p95", "p99", "max", "exp mean", "exp p95", "crow mean", "route mean")
 
@@ -55,7 +73,8 @@ func main() {
 		tableStart := time.Now()
 		table := cost.Table(g, p)
 		tableTime := time.Since(tableStart)
-		costFn := func(e int32) float64 { return table[e] }
+		// Same cost function the API uses: base table, then the overlay snapshot on top.
+		costFn := func(e int32) float64 { return snap.Cost(p, e, table[e]) }
 
 		// Pick query endpoints only from the profile's main network, so every query has an
 		// answer and we measure search time, not "no route" failures.
@@ -74,6 +93,7 @@ func main() {
 		lat := make([]time.Duration, 0, *n)
 		exp := make([]int, 0, *n)
 		var crow, length float64
+		noPath := 0
 		for q := 0; q < *n; q++ {
 			src, dst := pool[r.Intn(len(pool))], pool[r.Intn(len(pool))]
 			// Time only the search itself.
@@ -81,7 +101,10 @@ func main() {
 			path, err := route.AStar(g, costFn, src, dst)
 			lat = append(lat, time.Since(start))
 			if err != nil {
-				log.Fatalf("%s: %d->%d in the same component returned %v", p, src, dst, err)
+				// Only possible when hazards cut the network; count it but keep the timing
+				// (a failed search is real work the server would do too).
+				noPath++
+				continue
 			}
 			exp = append(exp, path.Expanded)
 			a, b := g.Nodes[src], g.Nodes[dst]
@@ -95,9 +118,10 @@ func main() {
 		for _, x := range exp {
 			mean += x
 		}
-		fmt.Printf("%-12s %8s %8s %8s %8s | %9d %9d | %8.0fm %8.0fm   (cost table %s)\n", p,
+		ok := len(exp)
+		fmt.Printf("%-12s %8s %8s %8s %8s | %9d %9d | %8.0fm %8.0fm   (cost table %s, no path %d)\n", p,
 			pct(lat, 50), pct(lat, 95), pct(lat, 99), lat[len(lat)-1].Round(time.Microsecond),
-			mean/len(exp), exp[len(exp)*95/100], crow/float64(*n), length/float64(*n), tableTime.Round(time.Microsecond))
+			mean/ok, exp[ok*95/100], crow/float64(ok), length/float64(ok), tableTime.Round(time.Microsecond), noPath)
 	}
 }
 

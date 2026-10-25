@@ -29,6 +29,20 @@ const (
 // Profiles lists all profiles in display order.
 var Profiles = []Profile{Wheelchair, Stroller, WalkWinter}
 
+// Index is the profile's position in Profiles (0, 1, 2). Per-profile data elsewhere (e.g. the
+// hazard overlay) is stored in small fixed arrays indexed by it, which is faster than a map.
+func (p Profile) Index() int {
+	switch p {
+	case Wheelchair:
+		return 0
+	case Stroller:
+		return 1
+	case WalkWinter:
+		return 2
+	}
+	panic("unknown profile " + string(p))
+}
+
 // ParseProfile validates a profile name.
 func ParseProfile(s string) (Profile, error) {
 	for _, p := range Profiles {
