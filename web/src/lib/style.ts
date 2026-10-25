@@ -1,7 +1,7 @@
 // Shared visual vocabulary: the same colours and labels are used on the map lines, the
 // legend and the segment list, so a user can match a list entry to the line on the map.
 
-import type { Confidence, Profile } from "./api";
+import type { Confidence, HazardType, Profile } from "./api";
 
 export const CONFIDENCE_COLOR: Record<Confidence, string> = {
   verified: "#1d4ed8", // blue-700: tags present
@@ -28,3 +28,13 @@ export const PROFILES: { id: Profile; label: string; hint: string }[] = [
 export function formatDistance(m: number): string {
   return m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
 }
+
+
+/** Hazard markers: one colour per type, so the map reads at a glance. */
+export const HAZARD_STYLE: Record<HazardType, { label: string; color: string }> = {
+  blocked_sidewalk: { label: "Blocked sidewalk", color: "#dc2626" }, // red
+  construction: { label: "Construction", color: "#ea580c" }, // orange
+  elevator_out: { label: "Elevator out", color: "#7c3aed" }, // violet
+  ice_snow: { label: "Ice / snow", color: "#0891b2" }, // cyan
+  missing_curb_ramp: { label: "Missing curb ramp", color: "#be185d" }, // pink
+};

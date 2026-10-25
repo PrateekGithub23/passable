@@ -147,3 +147,23 @@ Each entry: what was chosen, what was rejected, and why.
 **Chose:** `POST /api/v1/session` returns a random 128-bit id, which the client sends as `X-Session-ID` on writes. Unknown or missing ids get 401.
 **Rejected:** cookies, which would need `SameSite=None; Secure` across the Vercel and Fly domains; and client-generated ids (the server couldn't tell a real session from a made-up string).
 **Why:** no accounts (out of scope), but one vote per person per report still needs an identity, and rate limiting (Day 7) will key on it.
+
+## 23. Live updates: WebSocket hub with an edge -> subscribers inverted index
+**Chose:** one WebSocket per tab (`GET /ws`, `coder/websocket`). A client subscribes to its viewport and to its active route as `(profile, edge_ids)`. The hub keeps `byEdge: edge id -> clients`:
+- `hazard.*` events go to clients whose viewport contains the report.
+- `route.affected` goes only to clients indexed under the report's edge, and only if `hazard.EffectOn` blocks or penalizes their profile. An elevator outage doesn't prompt a winter walker.
+- It fires only when a report is created; votes on an existing report don't re-prompt.
+
+Each client has a 32-message send buffer, and one goroutine per client does all its writes (WebSocket writes can't run concurrently). A client that falls behind is disconnected rather than slowing the broadcast. `Accept` checks the Origin header against the same allowlist as CORS. The HTTP server's deadlines are cleared before the upgrade, so long-lived sockets aren't cut off.
+**Rejected:** broadcasting every event to everyone and letting clients filter (wasteful, and it leaks every user's prompts to everyone), Server-Sent Events (one-way; subscriptions would need a separate channel), and a scan over all clients per hazard (the index makes the route check a single map lookup).
+**Why:** the plan's requirement is that only affected users are notified. `TestHubRoutingOfMessages` covers it: a wheelchair route on the edge is prompted, a walk_winter route isn't, an unrelated hazard reaches nobody, a vote doesn't re-prompt, and unsubscribing removes the edge from the index.
+
+## 24. Cross-instance fan-out over Redis pub/sub, with Postgres as the safety net
+**Chose:**
+- **Publish after commit.** After a hazard write commits, the instance applies it locally (read-your-writes) and publishes the `Change`, which carries the full report state, on `passable:hazard-events`.
+- **Every instance handles every event.** Each instance, the writer included, applies the event to its overlay (a duplicate is ignored by seq) and pushes it to its own clients.
+- **Two ways to recover lost messages.** Pub/sub is fire-and-forget, so lost messages are recovered two ways: a seq gap triggers a resync, and a catch-up every 30 s compares `max(seq)` in Postgres with the overlay and resyncs if behind. The catch-up exists because a lost *last* message would never cause a gap.
+- **Bounded publish.** Publishing has a 500 ms budget and falls back to local delivery. `ContextTimeoutEnabled` is set on the Redis client because go-redis v9 ignores context deadlines without it. Before that fix, a paused Redis made a hazard POST take 5–9 s. After it, 0.52 s, and route requests still answered (0.1 s).
+
+**Rejected:** Redis Streams or a message broker (durable delivery, but Postgres is already the durable log, so a second one would be redundant), and Postgres `LISTEN/NOTIFY` (would work, but the plan puts fan-out on Redis, and it would tie every WebSocket instance to a dedicated DB connection).
+**Measured** (`docs/benchmarks/day6-propagation.md`): from POST start to the WebSocket event, p50 6.3 ms and p95 8.4 ms across instances, against 6.2 / 8.3 ms on the same instance. Almost all of it is the POST's own DB transaction. In the browser test, B's toast appeared 40 ms after A's POST started. With Redis paused, B fell one version behind and the catch-up brought it back within 3 s.

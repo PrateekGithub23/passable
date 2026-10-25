@@ -2,7 +2,7 @@
 
 Accessibility-aware pedestrian routing for the University of Waterloo campus and uptown Waterloo. Passable finds routes for three profiles. `wheelchair` treats steps as impassable and penalizes or blocks bad surfaces and missing or high kerbs. `stroller` blocks steps and applies milder penalties. `walk_winter` applies soft penalties and reacts strongly to hazards. Each segment is labelled `verified`, `inferred` or `unknown`, so the route says how much it trusts the map data. People can report hazards (elevator out, blocked sidewalk, ice); reports decay over time and are confirmed or resolved by votes. A copy-on-write overlay applies the reports to routing without blocking route queries, and anyone whose active route crosses an affected edge is told over WebSocket.
 
-> Status: Day 5 of 10. Routing, map UI, and crowd-sourced hazard reports that change routes immediately (copy-on-write overlay, versioned route cache).
+> Status: Day 6 of 10. Routing, map UI, crowd-sourced hazard reports that change routes immediately, and live updates: hazards appear on every open map, and users whose route is affected get a "reroute?" prompt.
 
 ## Running locally
 
@@ -61,6 +61,12 @@ Hazard types are `elevator_out`, `blocked_sidewalk`, `construction`, `ice_snow` 
 - if a hazard leaves no way through, it appears as a named barrier.
 
 Reports move from `active` to `confirmed` (2 confirmations), then to `resolved` (2 resolve votes, or the reporter) or `expired` (per-type TTL, extended by each confirmation).
+
+### Live updates (`GET /ws`)
+
+The map subscribes to its visible area and to the edges of the route on screen. Hazard changes arrive as `hazard.created|updated|expired`. A new hazard on the route's edges that matters for the chosen profile sends `route.affected`, and the UI asks "reroute?". With several API instances, events travel between them over Redis pub/sub, and Postgres stays the source of truth if a message is lost.
+
+Measured from a hazard POST to the WebSocket event: p50 6.3 ms and p95 8.4 ms, including the cross-instance trip. In the browser, the toast appeared 40 ms after the report was sent ([`docs/benchmarks/day6-propagation.md`](docs/benchmarks/day6-propagation.md); `go run ./cmd/wsprobe` reproduces it).
 
 `/places?q=` matches UW building codes exactly (`dc`, `slc`, `e7`), matches word prefixes (`dav`), and tolerates typos (`dana portr`).
 
