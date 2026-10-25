@@ -67,6 +67,10 @@ func TestBurstThenRefill(t *testing.T) {
 // one key at once; the atomic script must let exactly Burst through.
 func TestConcurrentRequestsNeverOverspend(t *testing.T) {
 	l, _ := newTestLimiter(t)
+	// This test is about atomicity, not latency: with 50 goroutines under -race a call can
+	// exceed the normal 50 ms budget and be allowed by design (fail-open), which would look
+	// like overspending. A generous budget keeps the two concerns separate.
+	l.timeout = 5 * time.Second
 	rule := Rule{Name: "t", Burst: 5, Per: time.Hour}
 	var passed atomic.Int32
 	var wg sync.WaitGroup

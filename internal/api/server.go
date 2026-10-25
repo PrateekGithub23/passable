@@ -36,6 +36,8 @@ type Config struct {
 	// IPHeader is the header a trusted reverse proxy puts the client IP in (e.g.
 	// "Fly-Client-IP"); empty means use the TCP peer address.
 	IPHeader string
+	// Recorder logs per-request routing stats to route_requests; nil disables it.
+	Recorder *Recorder
 }
 
 // Server holds the graph and per-profile base costs (read-only after New) and the live hazard
@@ -48,6 +50,7 @@ type Server struct {
 	cache    *cache.RouteCache
 	limiter  *ratelimit.Limiter
 	ipHeader string
+	recorder *Recorder
 	profiles map[cost.Profile]*profileState
 	anyComp  []int32 // components of the full graph, for snapping explanation routes
 	anyMain  int32
@@ -69,7 +72,7 @@ func blockedCost(lengthM float64) float64 { return 10_000 + 10*lengthM }
 func New(cfg Config) *Server {
 	s := &Server{
 		db: cfg.DB, g: cfg.Graph, overlay: cfg.Overlay, reports: cfg.Reports, cache: cfg.Cache,
-		limiter: cfg.Limiter, ipHeader: cfg.IPHeader,
+		limiter: cfg.Limiter, ipHeader: cfg.IPHeader, recorder: cfg.Recorder,
 		profiles: map[cost.Profile]*profileState{}, mux: http.NewServeMux(),
 	}
 

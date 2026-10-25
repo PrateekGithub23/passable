@@ -32,7 +32,8 @@ import (
 )
 
 const (
-	knnCandidates = 20  // edges fetched by the GiST KNN query, then re-ranked in meters
+	knnCandidates = 64  // edges fetched by the GiST KNN query, then re-ranked in meters
+	knnFallback   = 400 // second, wider query when none of the first batch is on the main network
 	maxSnapM      = 150 // farther than this from a usable edge counts as "no usable path nearby"
 )
 
@@ -116,6 +117,7 @@ func (c candidate) endpoint() route.Endpoint {
 // handleRoute is the HTTP layer only: validate input, fetch snap candidates, delegate to
 // plan, write the result. Keeping the logic in plan (no HTTP, no DB) makes it unit-testable.
 func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
+	began := time.Now()
 	q := r.URL.Query()
 	from, err := parseLatLng(q.Get("from"))
 	if err != nil {
@@ -140,17 +142,18 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 	if body, ok := s.cache.Get(r.Context(), key); ok {
 		w.Header().Set("X-Cache", "HIT")
 		writeRawJSON(w, body)
+		s.recorder.record(routeStat{profile: string(profile), durationMs: msSince(began), version: v.snap.Seq, cacheHit: true, at: began})
 		return
 	}
 	w.Header().Set("X-Cache", "MISS")
 
 	// r.Context() is cancelled if the client disconnects, which aborts the DB queries too.
-	candFrom, err := s.candidates(r.Context(), from)
+	candFrom, err := s.snapCandidates(r.Context(), from)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "snap failed")
 		return
 	}
-	candTo, err := s.candidates(r.Context(), to)
+	candTo, err := s.snapCandidates(r.Context(), to)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "snap failed")
 		return
@@ -167,7 +170,12 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cache.Set(r.Context(), key, body)
 	writeRawJSON(w, body)
+	expanded := int32(resp.NodesExpanded)
+	s.recorder.record(routeStat{profile: string(profile), distanceM: &resp.DistanceM, durationMs: msSince(began),
+		expanded: &expanded, version: v.snap.Seq, at: began})
 }
+
+func msSince(t time.Time) float64 { return float64(time.Since(t).Microseconds()) / 1000 }
 
 // writeRawJSON sends an already-encoded JSON body with status 200.
 func writeRawJSON(w http.ResponseWriter, body []byte) {
@@ -225,16 +233,34 @@ func (s *Server) plan(v view, candFrom, candTo []candidate) (routeResponse, int,
 	return s.buildResponse(v, path, anyFrom, anyTo, elapsed, false), http.StatusOK, ""
 }
 
+// snapCandidates returns enough nearby edges for plan to find one on the main network.
+//
+// Usually the first 64 nearest edges include one. The exception, found by the Day 8 load test:
+// inside buildings, OSM maps indoor corridors and stairs as dense little networks that aren't
+// connected to the outdoor paths. A point there can have dozens of disconnected edges closer
+// than the nearest connected one, so a fixed-size KNN would wrongly report "no mapped path".
+// In that case, look again with a much wider net.
+func (s *Server) snapCandidates(ctx context.Context, p graph.Point) ([]candidate, error) {
+	cands, err := s.candidates(ctx, p, knnCandidates)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := best(cands, func(ei int32) bool { return s.anyComp[s.g.Edges[ei].From] == s.anyMain }); ok {
+		return cands, nil
+	}
+	return s.candidates(ctx, p, knnFallback)
+}
+
 // candidates fetches the nearest edges by GiST KNN and re-ranks them by exact distance in meters.
 //
 // Why two steps: `<->` uses the spatial index, so it is fast, but on a geometry column it
-// measures distance in degrees, which ranks slightly differently from metres. Taking 20
-// candidates and re-measuring them in Go gets both speed and the right order.
-func (s *Server) candidates(ctx context.Context, p graph.Point) ([]candidate, error) {
+// measures distance in degrees, which ranks slightly differently from metres. Taking a batch
+// of candidates and re-measuring them in Go gets both speed and the right order.
+func (s *Server) candidates(ctx context.Context, p graph.Point, limit int) ([]candidate, error) {
 	// Note the argument order: ST_MakePoint takes (lon, lat).
 	rows, err := s.db.Query(ctx,
 		`SELECT id FROM edges ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326) LIMIT $3`,
-		p.Lon, p.Lat, knnCandidates)
+		p.Lon, p.Lat, limit)
 	if err != nil {
 		return nil, err
 	}
