@@ -4,6 +4,8 @@
 // selector, and once a route exists: a summary, how much of it is backed by verified data,
 // the API's plain-language notes, any barriers, and the segment list.
 
+import Link from "next/link";
+
 import type { Profile, RouteResponse } from "@/lib/api";
 import { BLOCKED_COLOR, CONFIDENCE_COLOR, CONFIDENCE_LABEL, formatDistance } from "@/lib/style";
 import ProfileSelector from "./ProfileSelector";
@@ -56,6 +58,13 @@ export default function RoutePanel({ profile, onProfileChange, hasStart, hasEnd,
       )}
 
       {route && <RouteSummary route={route} />}
+
+      {/* Small footer links, pushed to the bottom of the panel. */}
+      <footer className="mt-auto pt-4 text-xs text-gray-500">
+        <Link href="/status" className="hover:underline">
+          Status
+        </Link>
+      </footer>
     </div>
   );
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/PrateekGithub23/passable/internal/cost"
 	"github.com/PrateekGithub23/passable/internal/graph"
 	"github.com/PrateekGithub23/passable/internal/hazard"
+	"github.com/PrateekGithub23/passable/internal/metrics"
 	"github.com/PrateekGithub23/passable/internal/route"
 	"github.com/jackc/pgx/v5"
 )
@@ -143,6 +144,7 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Cache", "HIT")
 		writeRawJSON(w, body)
 		s.recorder.record(routeStat{profile: string(profile), durationMs: msSince(began), version: v.snap.Seq, cacheHit: true, at: began})
+		metrics.RouteDuration.WithLabelValues(string(profile), "hit").Observe(time.Since(began).Seconds())
 		return
 	}
 	w.Header().Set("X-Cache", "MISS")
@@ -173,6 +175,8 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 	expanded := int32(resp.NodesExpanded)
 	s.recorder.record(routeStat{profile: string(profile), distanceM: &resp.DistanceM, durationMs: msSince(began),
 		expanded: &expanded, version: v.snap.Seq, at: began})
+	metrics.RouteDuration.WithLabelValues(string(profile), "miss").Observe(time.Since(began).Seconds())
+	metrics.NodesExpanded.Observe(float64(resp.NodesExpanded))
 }
 
 func msSince(t time.Time) float64 { return float64(time.Since(t).Microseconds()) / 1000 }

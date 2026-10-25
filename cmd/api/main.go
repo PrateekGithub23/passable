@@ -22,6 +22,7 @@ import (
 	"github.com/PrateekGithub23/passable/internal/cache"
 	"github.com/PrateekGithub23/passable/internal/graph"
 	"github.com/PrateekGithub23/passable/internal/live"
+	"github.com/PrateekGithub23/passable/internal/metrics"
 	"github.com/PrateekGithub23/passable/internal/overlay"
 	"github.com/PrateekGithub23/passable/internal/ratelimit"
 	"github.com/PrateekGithub23/passable/internal/reports"
@@ -34,10 +35,12 @@ func main() {
 	dbURL := flag.String("db", envOr("DATABASE_URL", "postgres://passable:passable@localhost:5433/passable"), "Postgres connection URL")
 	cors := flag.String("cors", envOr("CORS_ORIGINS", "http://localhost:3000"), "comma-separated origins allowed to call the API from a browser")
 	redisURL := flag.String("redis", envOr("REDIS_URL", "redis://localhost:6379/0"), "Redis URL for the route cache (empty disables it)")
-	expiryEvery := flag.Duration("expiry-interval", 30*time.Second, "how often to expire hazard reports past their TTL")
+	expiryEvery := flag.Duration("expiry-interval", envDuration("EXPIRY_INTERVAL", 30*time.Second), "how often to expire hazard reports past their TTL (and check for missed events)")
 	rateLimit := flag.Bool("rate-limit", envOr("RATE_LIMIT", "true") == "true", "enforce rate limits (needs Redis); disable for load tests")
 	ipHeader := flag.String("ip-header", os.Getenv("TRUSTED_IP_HEADER"), "header a trusted proxy sets to the client IP (e.g. Fly-Client-IP); empty = TCP peer")
 	flag.Parse()
+
+	started := time.Now()
 
 	// ctx is cancelled on Ctrl-C or SIGTERM (what Docker/Fly send on shutdown).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -103,6 +106,22 @@ func main() {
 		}
 	}
 
+	// Delivering a change to this instance's WebSocket clients, with metrics: how long it took
+	// from the commit (on whichever instance wrote it) to this push.
+	propagation := metrics.NewWindow(500)
+	deliver := func(ch reports.Change) {
+		hub.Broadcast(ch)
+		if !ch.CommittedAt.IsZero() {
+			d := time.Since(ch.CommittedAt)
+			metrics.Propagation.Observe(d.Seconds())
+			propagation.Add(float64(d.Microseconds()) / 1000)
+		}
+		metrics.HazardEvents.WithLabelValues(ch.Kind).Inc()
+	}
+	metrics.Gauge("passable_graph_version", "Hazard event sequence applied on this instance.", func() float64 { return float64(holder.Load().Seq) })
+	metrics.Gauge("passable_live_hazards", "Live (active or confirmed) hazard reports.", func() float64 { return float64(holder.Load().Len()) })
+	metrics.Gauge("passable_ws_clients", "Connected WebSocket clients on this instance.", func() float64 { return float64(hub.Clients()) })
+
 	// How a committed hazard change travels:
 	//   with Redis:    writer commits -> publish -> every instance's bus.Run -> apply + push to its clients
 	//   without Redis: writer commits -> push to this instance's clients (already applied locally)
@@ -115,15 +134,15 @@ func main() {
 			defer cancel()
 			if err := bus.Publish(pctx, ch); err != nil {
 				log.Printf("publish failed (%v); notifying local clients only", err)
-				hub.Broadcast(ch)
+				deliver(ch)
 			}
 		}
 		go bus.Run(ctx, func(ch reports.Change) {
 			svc.ApplyChange(ctx, ch) // no-op for changes this instance wrote itself
-			hub.Broadcast(ch)
+			deliver(ch)
 		})
 	} else {
-		svc.OnCommit = hub.Broadcast
+		svc.OnCommit = deliver
 	}
 
 	// Start the expiry worker only now: it reads svc.OnCommit, which must be set first.
@@ -133,7 +152,8 @@ func main() {
 	recorder := api.NewRecorder(pool)
 	go recorder.Run(ctx)
 
-	srv := api.New(api.Config{DB: pool, Graph: g, Overlay: holder, Reports: svc, Cache: routeCache, Live: hub, Limiter: limiter, IPHeader: *ipHeader, Recorder: recorder})
+	srv := api.New(api.Config{DB: pool, Graph: g, Overlay: holder, Reports: svc, Cache: routeCache, Live: hub, Limiter: limiter, IPHeader: *ipHeader, Recorder: recorder,
+		Propagation: propagation, Started: started})
 
 	// Timeouts stop slow or stuck clients from holding connections open forever.
 	hs := &http.Server{Addr: *addr, Handler: api.WithCORS(srv, origins), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}
@@ -149,6 +169,13 @@ func main() {
 	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(key)); err == nil {
+		return d
+	}
+	return def
 }
 
 func envOr(key, def string) string {

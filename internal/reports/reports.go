@@ -72,6 +72,8 @@ type Change struct {
 	Seq    int64  `json:"seq"`
 	Kind   string `json:"kind"` // created | updated | resolved | expired
 	Report Report `json:"report"`
+	// When the writing instance committed it; receivers measure propagation latency from here.
+	CommittedAt time.Time `json:"committed_at"`
 }
 
 // Service owns report persistence and overlay updates.
@@ -259,7 +261,7 @@ func (s *Service) write(ctx context.Context, fn func(tx pgx.Tx) (Report, string,
 	if err := tx.Commit(ctx); err != nil {
 		return Report{}, err
 	}
-	s.committed(ctx, Change{Seq: seq, Kind: event, Report: r})
+	s.committed(ctx, Change{Seq: seq, Kind: event, Report: r, CommittedAt: time.Now()})
 	return r, nil
 }
 
@@ -388,7 +390,7 @@ func (s *Service) ExpireDue(ctx context.Context) (int, error) {
 		if err != nil {
 			r = Report{ID: e.id, EdgeID: e.edgeID, Status: hazard.Expired}
 		}
-		s.committed(ctx, Change{Seq: e.seq, Kind: "expired", Report: r})
+		s.committed(ctx, Change{Seq: e.seq, Kind: "expired", Report: r, CommittedAt: time.Now()})
 	}
 	return len(evs), nil
 }

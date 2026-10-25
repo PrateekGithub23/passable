@@ -1,0 +1,11 @@
+# Only Go sources are needed to build the API image.
+.git
+web
+data
+bin
+docs
+integration
+testdata
+scripts
+*.md
+.env

@@ -230,6 +230,12 @@ export default function MapView({ start, end, route, hazards, reporting, reportP
     if (reportPoint) {
       markersRef.current.report ??= new MarkerClass({ color: "#ea580c" });
       markersRef.current.report.setLngLat(reportPoint).addTo(map);
+      // The report form opens over the lower part of the screen. Pan so the tapped spot sits
+      // ~80 px below the top of the map, where the form can't cover it and the user can still
+      // see what they are reporting. (offset moves the target point relative to the centre;
+      // negative y = above it.)
+      const h = map.getCanvas().clientHeight;
+      map.easeTo({ center: reportPoint, offset: [0, -(h / 2 - Math.min(80, h * 0.2))], duration: 400 });
     } else {
       markersRef.current.report?.remove();
       markersRef.current.report = undefined;
