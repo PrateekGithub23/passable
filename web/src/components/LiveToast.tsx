@@ -24,7 +24,12 @@ export default function LiveToast({ affected, onReroute, onDismiss }: Props) {
     >
       <span aria-hidden className="mt-1 h-3 w-3 shrink-0 rounded-full" style={{ background: color }} />
       <div className="flex-1">
-        <p className="text-sm font-semibold text-gray-900">{label} reported on your route</p>
+        <p className="text-sm font-semibold text-gray-900">
+          {label} reported on your route
+          {affected.hazard.demo && (
+            <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800">Demo</span>
+          )}
+        </p>
         {affected.hazard.note && <p className="text-sm text-gray-600">“{affected.hazard.note}”</p>}
         <div className="mt-3 flex gap-2">
           <button onClick={onReroute} className="rounded-lg bg-blue-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-800">

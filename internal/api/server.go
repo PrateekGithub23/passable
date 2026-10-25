@@ -17,6 +17,7 @@ import (
 	"github.com/PrateekGithub23/passable/internal/graph"
 	"github.com/PrateekGithub23/passable/internal/live"
 	"github.com/PrateekGithub23/passable/internal/overlay"
+	"github.com/PrateekGithub23/passable/internal/ratelimit"
 	"github.com/PrateekGithub23/passable/internal/reports"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -30,6 +31,11 @@ type Config struct {
 	Reports *reports.Service
 	Cache   *cache.RouteCache
 	Live    *live.Hub // WebSocket hub; nil disables GET /ws
+	// Limiter enforces rate limits; nil disables them (no Redis, or -rate-limit=false).
+	Limiter *ratelimit.Limiter
+	// IPHeader is the header a trusted reverse proxy puts the client IP in (e.g.
+	// "Fly-Client-IP"); empty means use the TCP peer address.
+	IPHeader string
 }
 
 // Server holds the graph and per-profile base costs (read-only after New) and the live hazard
@@ -40,6 +46,8 @@ type Server struct {
 	overlay  *overlay.Holder
 	reports  *reports.Service
 	cache    *cache.RouteCache
+	limiter  *ratelimit.Limiter
+	ipHeader string
 	profiles map[cost.Profile]*profileState
 	anyComp  []int32 // components of the full graph, for snapping explanation routes
 	anyMain  int32
@@ -61,6 +69,7 @@ func blockedCost(lengthM float64) float64 { return 10_000 + 10*lengthM }
 func New(cfg Config) *Server {
 	s := &Server{
 		db: cfg.DB, g: cfg.Graph, overlay: cfg.Overlay, reports: cfg.Reports, cache: cfg.Cache,
+		limiter: cfg.Limiter, ipHeader: cfg.IPHeader,
 		profiles: map[cost.Profile]*profileState{}, mux: http.NewServeMux(),
 	}
 
@@ -83,17 +92,19 @@ func New(cfg Config) *Server {
 	}
 
 	// Go 1.22+ ServeMux patterns include the method and support {id} wildcards.
+	// Each handler is wrapped in its rate limits (see limits.go); /healthz is never limited
+	// so load balancers can always probe.
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
-	s.mux.HandleFunc("GET /api/v1/route", s.handleRoute)
-	s.mux.HandleFunc("GET /api/v1/places", s.handlePlaces)
+	s.mux.HandleFunc("GET /api/v1/route", s.limit(s.handleRoute, s.byIP(limitRouteIP)))
+	s.mux.HandleFunc("GET /api/v1/places", s.limit(s.handlePlaces, s.byIP(limitPlacesIP)))
 	s.mux.HandleFunc("GET /api/v1/graph/version", s.handleVersion)
-	s.mux.HandleFunc("POST /api/v1/session", s.handleNewSession)
-	s.mux.HandleFunc("GET /api/v1/hazards", s.handleListHazards)
-	s.mux.HandleFunc("POST /api/v1/hazards", s.handleCreateHazard)
-	s.mux.HandleFunc("POST /api/v1/hazards/{id}/confirm", s.handleVote(reports.Confirm))
-	s.mux.HandleFunc("POST /api/v1/hazards/{id}/resolve", s.handleVote(reports.Resolve))
+	s.mux.HandleFunc("POST /api/v1/session", s.limit(s.handleNewSession, s.byIP(limitNewSession)))
+	s.mux.HandleFunc("GET /api/v1/hazards", s.limit(s.handleListHazards, s.byIP(limitListHazardIP)))
+	s.mux.HandleFunc("POST /api/v1/hazards", s.limit(s.handleCreateHazard, bySession(limitReportSess), s.byIP(limitReportIP)))
+	s.mux.HandleFunc("POST /api/v1/hazards/{id}/confirm", s.limit(s.handleVote(reports.Confirm), bySession(limitVoteSess)))
+	s.mux.HandleFunc("POST /api/v1/hazards/{id}/resolve", s.limit(s.handleVote(reports.Resolve), bySession(limitVoteSess)))
 	if cfg.Live != nil {
-		s.mux.HandleFunc("GET /ws", cfg.Live.ServeWS)
+		s.mux.HandleFunc("GET /ws", s.limit(cfg.Live.ServeWS, s.byIP(limitWebSocketIP)))
 	}
 	return s
 }

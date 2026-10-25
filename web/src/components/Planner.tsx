@@ -10,13 +10,18 @@
 // Live updates (useLive): the map's visible area and the current route's edges are sent to the
 // server over WebSocket. New hazards appear on the map as they're reported; one that lands on
 // this route shows the "reroute?" toast.
+//
+// Reporting: "Report a problem" switches the map into report mode. The next tap marks the
+// spot and opens ReportSheet; sending it files the report, which then comes back over the
+// WebSocket like anyone else's.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, fetchRoute, type BBox, type LngLat, type Profile, type RouteResponse } from "@/lib/api";
+import { ApiError, fetchRoute, voteHazard, type BBox, type LngLat, type Profile, type RouteResponse } from "@/lib/api";
 import { useLive } from "@/lib/useLive";
 import LiveToast from "./LiveToast";
 import MapView from "./MapView";
+import ReportSheet from "./ReportSheet";
 import RoutePanel from "./RoutePanel";
 
 // A finished request, tagged with the inputs it answers.
@@ -35,6 +40,10 @@ export default function Planner() {
   // Bumped by "Reroute": part of the request key, so the same points + profile fetch again
   // (and get a new route, since the hazard changed the graph version and thus the cache key).
   const [reroutes, setReroutes] = useState(0);
+  // Report flow: off -> choosing a spot (reporting, no point) -> filling the form (point set).
+  const [reporting, setReporting] = useState(false);
+  const [reportPoint, setReportPoint] = useState<LngLat>();
+  const [thanks, setThanks] = useState(false);
 
   // A string identifying "the route we want right now"; undefined until both points are set.
   const requestKey = start && end ? `${start}|${end}|${profile}|${reroutes}` : undefined;
@@ -59,6 +68,10 @@ export default function Planner() {
 
   const handleMapClick = useCallback(
     (p: LngLat) => {
+      if (reporting) {
+        setReportPoint(p); // in report mode a tap marks the problem, not a route point
+        return;
+      }
       clearAffected(); // a prompt about the old route is meaningless once the user moves on
       if (!start || end) {
         // Starting over: this click becomes the new start.
@@ -68,7 +81,7 @@ export default function Planner() {
         setEnd(p);
       }
     },
-    [start, end, clearAffected],
+    [start, end, clearAffected, reporting],
   );
 
   // Fetch a route whenever the request key changes (new points or new profile).
@@ -98,6 +111,18 @@ export default function Planner() {
     setReroutes((n) => n + 1);
   };
 
+  const cancelReport = useCallback(() => {
+    setReporting(false);
+    setReportPoint(undefined);
+  }, []);
+
+  // "Thanks" message auto-hides after a few seconds.
+  useEffect(() => {
+    if (!thanks) return;
+    const t = setTimeout(() => setThanks(false), 5000);
+    return () => clearTimeout(t);
+  }, [thanks]);
+
   // Layout: panel on the left on wide screens; on phones the map is on top and the panel
   // scrolls underneath it.
   return (
@@ -123,15 +148,60 @@ export default function Planner() {
           end={end}
           route={shownRoute}
           hazards={hazards}
+          reporting={reporting}
+          reportPoint={reportPoint}
           onMapClick={handleMapClick}
           onViewportChange={setViewport}
+          onVote={voteHazard}
         />
-        {/* Toast floats over the map; only shown while a route is displayed. */}
-        {affected && shownRoute && (
-          <div className="pointer-events-none absolute inset-x-0 top-4 flex justify-center px-4">
-            <LiveToast affected={affected} onReroute={reroute} onDismiss={clearAffected} />
+
+        {/* Top of the map: the reroute prompt, or report-mode instructions, or thanks. */}
+        <div className="pointer-events-none absolute inset-x-0 top-4 flex justify-center px-4">
+          {reporting && !reportPoint ? (
+            <div role="status" className="pointer-events-auto flex items-center gap-3 rounded-xl bg-gray-900 px-4 py-3 text-sm text-white shadow-lg">
+              Tap the map exactly where the problem is.
+              <button onClick={cancelReport} className="rounded-md bg-white/15 px-2 py-1 hover:bg-white/25">
+                Cancel
+              </button>
+            </div>
+          ) : thanks ? (
+            <div role="status" className="rounded-xl bg-green-700 px-4 py-3 text-sm text-white shadow-lg">
+              Thanks! Your report is live. People nearby can confirm it.
+            </div>
+          ) : (
+            affected && shownRoute && <LiveToast affected={affected} onReroute={reroute} onDismiss={clearAffected} />
+          )}
+        </div>
+
+        {/* Bottom of the map: the report form, or the button that starts reporting.
+            The form is a full-width bottom sheet over the whole page on phones (the map is only
+            the top half there), and a floating card over the map on wider screens. */}
+        {reportPoint && (
+          <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center p-2 md:absolute md:bottom-4 md:px-4">
+            <ReportSheet
+              point={reportPoint}
+              onCancel={cancelReport}
+              onDone={() => {
+                cancelReport();
+                setThanks(true);
+              }}
+            />
           </div>
         )}
+        <div className="pointer-events-none absolute inset-x-0 bottom-8 flex justify-center px-4">
+          {!reportPoint &&
+            !reporting && (
+              <button
+                onClick={() => {
+                  clearAffected();
+                  setReporting(true);
+                }}
+                className="pointer-events-auto flex items-center gap-2 rounded-full bg-orange-600 px-5 py-3 text-sm font-semibold text-white shadow-lg hover:bg-orange-700"
+              >
+                <span aria-hidden>⚠</span> Report a problem
+              </button>
+            )}
+        </div>
       </main>
     </div>
   );

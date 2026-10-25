@@ -167,3 +167,37 @@ Each client has a 32-message send buffer, and one goroutine per client does all 
 
 **Rejected:** Redis Streams or a message broker (durable delivery, but Postgres is already the durable log, so a second one would be redundant), and Postgres `LISTEN/NOTIFY` (would work, but the plan puts fan-out on Redis, and it would tie every WebSocket instance to a dedicated DB connection).
 **Measured** (`docs/benchmarks/day6-propagation.md`): from POST start to the WebSocket event, p50 6.3 ms and p95 8.4 ms across instances, against 6.2 / 8.3 ms on the same instance. Almost all of it is the POST's own DB transaction. In the browser test, B's toast appeared 40 ms after A's POST started. With Redis paused, B fell one version behind and the catch-up brought it back within 3 s.
+
+## 25. Rate limiting: Redis token buckets, per session and per IP, fail-open
+**Chose:** a token bucket per `(rule, key)` in Redis, updated by one Lua script, which Redis runs atomically. Concurrent requests on several instances can't both spend the last token: `TestConcurrentRequestsNeverOverspend` lets exactly 5 of 50 simultaneous requests through.
+
+| Endpoint | Key | Burst | Refill |
+|---|---|---|---|
+| `POST /hazards` | session | 5 | 1 per 3 min (20/h) |
+| `POST /hazards` | IP | 20 | 1/min |
+| `POST /hazards/{id}/confirm`, `/resolve` | session | 30 | 1 per 10 s |
+| `POST /session` | IP | 10 | 1/min |
+| `GET /route` | IP | 60 | 5/s |
+| `GET /places` | IP | 30 | ~3/s |
+| `GET /hazards` | IP | 60 | 2/s |
+| `GET /ws` (connect) | IP | 10 | 1 per 10 s |
+
+Refusals are `429` with `Retry-After`. Writes are limited per session *and* per IP: per session so one person can't flood reports, per IP so minting new sessions doesn't escape the limit. The client IP is read from a proxy header only when one is configured (`TRUSTED_IP_HEADER`, e.g. `Fly-Client-IP`); otherwise anyone could send a fake `X-Forwarded-For` and get a fresh bucket on every request. If Redis is unreachable the limiter allows the request (fail-open, 50 ms budget), and `-rate-limit=false` turns limits off for load tests.
+**Rejected:** fixed windows (they allow twice the limit around a window boundary), in-memory limits (each instance would have its own budget), and failing closed (a Redis blip would take reporting down).
+**Verified:** a session's 6th report within the burst gets `429 Retry-After: 180`.
+
+## 26. Demo simulator, clearly labelled
+**Chose:** `cmd/simulator` acts like a few people. Using only the public API, it reports realistic hazards around the campus core, confirms them, and resolves them, keeping at most N live, and resolves everything it created when stopped with Ctrl-C. Its reports carry `demo: true` (migration 004, `is_demo`), which the UI shows as a "Demo" badge in popups and the reroute toast. It retries points the API rejects as too far from a path, and waits out `429`s.
+**Why:** the live features need hazards to show. Simulated data must never be mistaken for real reports, and the simulator never touches non-demo reports.
+
+## 27. Report flow designed for first-time users
+**Chose:**
+- **One entry point:** a single "Report a problem" button on the map.
+- **Three steps:** tap the spot, then pick from 5 plainly named types, each with a one-line hint. One optional yes/no question ("Can someone in a wheelchair get past it?", which maps to severity, defaulted per type), and an optional note.
+- **Errors say what to do next.** For example: "That spot isn't on a path we know. Tap right on the sidewalk or path."
+- **Votes in the popup.** Every hazard popup has "Still there" / "It's gone".
+- **Sessions are invisible.** The session is created on first write and kept in localStorage; on a 401 the client gets a new one and retries.
+
+**Verified** with a headless "stranger" test that finds every control only by its visible text. It covered an off-path tap and its guidance, a successful report, a second person confirming it, and the reporter resolving it. The test caught two layout bugs that are now fixed: the Send button was below the fold at 800 px, and on phones MapLibre's expanded attribution covered the report button (fixed with compact attribution, plus a full-width bottom sheet with pinned buttons).
+
+**Feature freeze** from here on, as planned: Days 8–10 are tests, load tests, deployment and docs only.

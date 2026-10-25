@@ -30,14 +30,20 @@ interface Props {
   end?: LngLat;
   route?: RouteResponse;
   hazards: Hazard[];
+  /** Report mode: clicks pick the problem's location (and don't open hazard popups). */
+  reporting: boolean;
+  /** Where the user tapped in report mode; shown as a marker while the form is open. */
+  reportPoint?: LngLat;
   onMapClick: (point: LngLat) => void;
   onViewportChange: (bbox: BBox) => void;
+  /** Vote from a hazard popup; resolves with the updated report. */
+  onVote: (id: number, kind: "confirm" | "resolve") => Promise<Hazard>;
 }
 
-export default function MapView({ start, end, route, hazards, onMapClick, onViewportChange }: Props) {
+export default function MapView({ start, end, route, hazards, reporting, reportPoint, onMapClick, onViewportChange, onVote }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const markersRef = useRef<{ start?: Marker; end?: Marker }>({});
+  const markersRef = useRef<{ start?: Marker; end?: Marker; report?: Marker }>({});
   // The Marker class arrives with the dynamic import, so keep a handle to it for later effects.
   const markerClassRef = useRef<typeof Marker | null>(null);
   const popupClassRef = useRef<typeof Popup | null>(null);
@@ -50,10 +56,14 @@ export default function MapView({ start, end, route, hazards, onMapClick, onView
   // reading the ref (instead of capturing `onMapClick`) avoids calling a stale handler.
   const onClickRef = useRef(onMapClick);
   const onViewportRef = useRef(onViewportChange);
+  const onVoteRef = useRef(onVote);
+  const reportingRef = useRef(reporting);
   useEffect(() => {
     onClickRef.current = onMapClick;
     onViewportRef.current = onViewportChange;
-  }, [onMapClick, onViewportChange]);
+    onVoteRef.current = onVote;
+    reportingRef.current = reporting;
+  }, [onMapClick, onViewportChange, onVote, reporting]);
 
   // 1) Create the map once, on mount; destroy it on unmount.
   useEffect(() => {
@@ -75,15 +85,20 @@ export default function MapView({ start, end, route, hazards, onMapClick, onView
         center: UW_CAMPUS,
         zoom: 15,
         maxBounds: CAMERA_LIMIT,
+        // Compact attribution (an (i) button that expands on tap). The full text is required
+        // credit for OSM/OpenFreeMap, but expanded it covers the "Report a problem" button on phones.
+        attributionControl: { compact: true },
       });
       map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
       map.on("click", (e) => {
         if (!map) return;
-        // A click on a hazard marker opens its details instead of setting a route point.
-        const hit = map.getLayer("hazards") ? map.queryRenderedFeatures(e.point, { layers: ["hazards"] }) : [];
+        // A click on a hazard marker opens its details instead of setting a route point
+        // (except in report mode, where every click means "the problem is here").
+        const hit = !reportingRef.current && map.getLayer("hazards") ? map.queryRenderedFeatures(e.point, { layers: ["hazards"] }) : [];
         const h = hit.length > 0 ? hazardsByIdRef.current.get(hit[0].properties.id) : undefined;
         if (h && popupClassRef.current) {
-          new popupClassRef.current({ offset: 10 }).setLngLat(h.point).setDOMContent(hazardPopup(h)).addTo(map);
+          const vote = (kind: "confirm" | "resolve") => onVoteRef.current(h.id, kind);
+          new popupClassRef.current({ offset: 10 }).setLngLat(h.point).setDOMContent(hazardPopup(h, vote)).addTo(map);
           return;
         }
         onClickRef.current([e.lngLat.lng, e.lngLat.lat]);
@@ -102,8 +117,8 @@ export default function MapView({ start, end, route, hazards, onMapClick, onView
         if (!map) return;
         addRouteLayers(map);
         // Pointer cursor over hazard markers, so they read as clickable.
-        map.on("mouseenter", "hazards", () => (map!.getCanvas().style.cursor = "pointer"));
-        map.on("mouseleave", "hazards", () => (map!.getCanvas().style.cursor = ""));
+        map.on("mouseenter", "hazards", () => !reportingRef.current && (map!.getCanvas().style.cursor = "pointer"));
+        map.on("mouseleave", "hazards", () => !reportingRef.current && (map!.getCanvas().style.cursor = ""));
         mapRef.current = map;
         setReady(true);
         reportViewport();
@@ -206,7 +221,22 @@ export default function MapView({ start, end, route, hazards, onMapClick, onView
     });
   }, [ready, route, start, end]);
 
-  // 5) Live hazards -> circle markers, coloured by type; confirmed reports drawn larger.
+  // 5) Report mode: crosshair cursor while choosing a spot, and a marker on the chosen spot.
+  useEffect(() => {
+    const map = mapRef.current;
+    const MarkerClass = markerClassRef.current;
+    if (!ready || !map || !MarkerClass) return;
+    map.getCanvas().style.cursor = reporting ? "crosshair" : "";
+    if (reportPoint) {
+      markersRef.current.report ??= new MarkerClass({ color: "#ea580c" });
+      markersRef.current.report.setLngLat(reportPoint).addTo(map);
+    } else {
+      markersRef.current.report?.remove();
+      markersRef.current.report = undefined;
+    }
+  }, [ready, reporting, reportPoint]);
+
+  // 6) Live hazards -> circle markers, coloured by type; confirmed reports drawn larger.
   useEffect(() => {
     const map = mapRef.current;
     hazardsByIdRef.current = new Map(hazards.map((h) => [h.id, h]));
@@ -227,19 +257,47 @@ export default function MapView({ start, end, route, hazards, onMapClick, onView
 // hazardPopup builds the popup content with DOM nodes and textContent rather than an HTML
 // string: the note is user-written text, and textContent can never be interpreted as HTML
 // (no script injection through a hazard note).
-function hazardPopup(h: Hazard): HTMLElement {
+//
+// The two buttons let anyone passing by keep reports accurate: "Still there" confirms (and
+// extends its lifetime), "It's gone" votes to resolve it.
+function hazardPopup(h: Hazard, vote: (kind: "confirm" | "resolve") => Promise<Hazard>): HTMLElement {
   const el = document.createElement("div");
-  el.className = "text-sm";
+  el.className = "text-sm min-w-48";
   const add = (tag: string, text: string, className = "") => {
     const node = document.createElement(tag);
     node.textContent = text;
     node.className = className;
     el.appendChild(node);
+    return node;
   };
-  add("p", HAZARD_STYLE[h.type].label, "font-semibold text-gray-900");
+  add("p", HAZARD_STYLE[h.type].label + (h.demo ? "  · DEMO" : ""), "font-semibold text-gray-900");
+  if (h.demo) add("p", "Simulated report for demonstration", "text-xs text-amber-700");
   if (h.note) add("p", `“${h.note}”`, "text-gray-700");
   const minutes = Math.max(0, Math.round((Date.now() - Date.parse(h.created_at)) / 60000));
-  add("p", `${h.status === "confirmed" ? "Confirmed" : "Reported"} · ${minutes} min ago · ${h.confirm_count} confirmation(s)`, "text-xs text-gray-500");
+  const status = add("p", `${h.status === "confirmed" ? "Confirmed" : "Reported"} · ${minutes} min ago · ${h.confirm_count} confirmation(s)`, "text-xs text-gray-500");
+
+  const row = document.createElement("div");
+  row.className = "mt-2 flex gap-2";
+  el.appendChild(row);
+  const button = (label: string, kind: "confirm" | "resolve", className: string) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = `rounded-md px-2 py-1 text-xs font-medium ${className}`;
+    b.onclick = async () => {
+      row.querySelectorAll("button").forEach((x) => (x.disabled = true));
+      try {
+        const updated = await vote(kind);
+        status.textContent =
+          updated.status === "resolved" ? "Marked as gone. Thanks!" : `Thanks! ${updated.confirm_count} confirmation(s), ${updated.resolve_count} say it's gone.`;
+      } catch (err) {
+        status.textContent = err instanceof Error ? err.message : "Couldn't save your vote.";
+        row.querySelectorAll("button").forEach((x) => (x.disabled = false));
+      }
+    };
+    row.appendChild(b);
+  };
+  button("Still there", "confirm", "bg-gray-900 text-white hover:bg-gray-700");
+  button("It's gone", "resolve", "bg-gray-100 text-gray-900 hover:bg-gray-200");
   return el;
 }
 
