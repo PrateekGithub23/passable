@@ -237,3 +237,17 @@ Refusals are `429` with `Retry-After`. Writes are limited per session *and* per 
 - a two-browser test on the live site went from report to "reroute?" prompt in 470 ms, and the reroute avoided the reported path.
 
 **Watch:** the Fly organisation is on a trial plan, so check its limits in the Fly dashboard before relying on the demo staying up.
+
+## 31. UI redesign: plain language first, technical detail on demand
+**Audit findings:** a first-time visitor saw only "Click the map to set your start". Place search existed in the API but not in the UI. The main panel showed developer metrics ("found in 0.25 ms · 200 nodes searched"), API jargon ("confidence: unknown", `paving_stones`, "road without sidewalk data"), and seven near-identical route rows, all expanded. The diagnostics-only Status page sat in the primary navigation.
+**Chose:**
+- **Search first.** From/To place search (WAI-ARIA combobox, debounced, backed by the existing `/places` API). Map taps still work and fill whichever end is empty.
+- **One state at a time** in the panel: guidance, "now choose a destination", a skeleton while loading, an error with Retry, or the route.
+- **Route summary:** distance, an accessible/has-barriers verdict, "N% of this route has accessibility details" (floored, so 99.6% isn't shown as 100%), a "Things to know" list built from the structured response, and step-by-step details collapsed by default.
+- **Words, not codes.** Confidence is shown as Mapped / Assumed / Not mapped. OSM values and internal reasons are translated (`humanizeReason`, `humanizeSurface`).
+- **Identity:** a teal brand on warm stone neutrals, amber only for caution and reporting, red only for barriers. The typeface is Atkinson Hyperlegible Next, designed by the Braille Institute for low-vision readers, which fits the product. Lucide icons throughout. A custom logo, favicon and map markers that match the From/To fields.
+- **Navigation:** Status leaves the main navigation and is linked from About as "System status (technical)". About and limitations stay one page, with limitations in a prominent card.
+- **Phone:** the panel is a rounded sheet under the map. The report form is a full-width sheet with pinned buttons.
+
+**Rejected:** a component library (the app has a handful of components, and Tailwind plus Lucide is enough); a travel-time estimate (it would need an assumed walking speed per profile, i.e. invented numbers); removing Status altogether (it's real transparency, just not for everyday users).
+**Verified:** the stranger test (controls found by visible text) and the two-browser live test pass on the new UI. The prompt appeared 89 ms after Send, locally. Lint, typecheck and build are clean, and no backend or deployment configuration changed.
