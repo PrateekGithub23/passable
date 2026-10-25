@@ -2,7 +2,23 @@
 
 Accessibility-aware pedestrian routing for the University of Waterloo campus and uptown Waterloo. Passable finds routes for three profiles. `wheelchair` treats steps as impassable and penalizes or blocks bad surfaces and missing or high kerbs. `stroller` blocks steps and applies milder penalties. `walk_winter` applies soft penalties and reacts strongly to hazards. Each segment is labelled `verified`, `inferred` or `unknown`, so the route says how much it trusts the map data. People can report hazards (elevator out, blocked sidewalk, ice); reports decay over time and are confirmed or resolved by votes. A copy-on-write overlay applies the reports to routing without blocking route queries, and anyone whose active route crosses an affected edge is told over WebSocket.
 
-> Status: Day 7 of 10, feature complete (freeze). Routing for three profiles, a map UI with a report-a-problem flow, crowd-sourced hazards that change routes immediately, live updates with a "reroute?" prompt, rate limiting, and a labelled demo simulator.
+> Status: Day 9 of 10, deployed. **Live: https://passable-alpha.vercel.app** (API: https://passable-api.fly.dev, [status page](https://passable-alpha.vercel.app/status)).
+
+## Production
+
+| Piece | Where |
+|---|---|
+| Frontend | Vercel: https://passable-alpha.vercel.app |
+| API (Go) | Fly.io, one machine in `iad`: https://passable-api.fly.dev (`/healthz`, `/metrics`) |
+| Postgres + PostGIS | Neon, us-east-1 |
+| Redis | Upstash free tier, us-east-1 (TLS) |
+
+All of it runs on free tiers with no payment method. Setup steps are in [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
+Measured on the deployed system (2026-10-25):
+- **Routing:** route requests not in the cache average 11.6 ms on the server over 11 distinct routes. Most of that is the two snapping queries between Fly and Neon; the A* search itself takes ~0.2 ms. Repeat requests are served from the Redis cache.
+- **Live updates, server side:** a hazard reaches WebSocket clients 2.2 ms (p50) after it is committed, through Upstash pub/sub.
+- **Live updates, in the browser:** in a two-browser test on the live site, a report filed through the UI in one browser showed the "reroute?" prompt in the other 470 ms after Send was pressed. That includes both browsers' internet round trips to Virginia.
 
 ## Running locally
 
