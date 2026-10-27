@@ -64,6 +64,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("load graph: %v", err)
 	}
+	// An empty database (migrated but never imported) can't route anything; say so plainly
+	// instead of failing later on an empty graph.
+	if len(g.Edges) == 0 {
+		log.Fatalf("load graph: the edges table is empty; import OSM data first (scripts/fetch_osm.sh, then go run ./cmd/importer)")
+	}
 	log.Printf("graph loaded: %d nodes, %d edges in %s", len(g.Nodes), len(g.Edges), time.Since(start).Round(time.Millisecond))
 
 	// Hazards: start with an empty overlay, expire anything overdue, then load every live

@@ -1,0 +1,70 @@
+# NetworkPolicies: deny all inbound traffic in the namespace, then allow only the paths the
+# app needs. A compromised or misconfigured pod elsewhere can't reach the database or Redis.
+#
+#   anyone ──8080──> API ──5432──> Postgres <──5432── migrate Job
+#                     └───6379──> Redis
+#
+# Pods opt in to database access with the label passable/db-client=true (API and migrate Job).
+# Outbound traffic (egress) is left open: the API needs DNS, and nothing else is exposed.
+
+# 1. Default deny: a pod accepts no inbound connections unless a policy below allows them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {} # every pod in the namespace
+  policyTypes: ["Ingress"]
+---
+# 2. The API serves HTTP and WebSocket traffic from anywhere (a Service, Ingress or port-forward).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-allow-http
+spec:
+  podSelector:
+    matchLabels:
+      app: passable-api
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: 8080
+          protocol: TCP
+---
+# 3. Postgres accepts connections only from pods labelled as database clients.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-db-clients
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              passable/db-client: "true"
+      ports:
+        - port: 5432
+          protocol: TCP
+---
+# 4. Redis accepts connections only from the API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-allow-api
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: passable-api
+      ports:
+        - port: 6379
+          protocol: TCP

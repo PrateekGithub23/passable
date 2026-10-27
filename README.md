@@ -107,7 +107,8 @@ k6 run -e RATE=200 scripts/k6/load.js            # load test (API started with -
 - **Golden routes:** 3 campus trips × 3 profiles, pinned to recorded results, using a committed snapshot of the real graph (`testdata/`).
 - **Concurrency:** a race-detector stress test of routing during constant hazard writes; the hub's targeting; the rate limiter's atomicity.
 - **Integration:** the full hazard lifecycle across two API instances on real Postgres and Redis (WebSocket delivery, cache key change, votes, expiry, gap → resync), plus a regression test for a snapping bug the load test found.
-- **CI** runs all of it on every push, and a push to `main` that passes deploys the API to Fly.io. The site deploys from the same push through Vercel ([how deployment works](docs/DEPLOY.md#how-continuous-deployment-works)).
+- **Kubernetes:** `scripts/k8s-up.sh` deploys the stack to a local kind cluster (2 API replicas, migration Job, probes, NetworkPolicies) and smoke-tests it, including a hazard crossing between replicas. See [docs/KUBERNETES.md](docs/KUBERNETES.md).
+- **CI** runs all of it on every push, plus a Trivy scan of the API image and the kind deploy, and a push to `main` that passes deploys the API to Fly.io. The site deploys from the same push through Vercel ([how deployment works](docs/DEPLOY.md#how-continuous-deployment-works)).
 
 ## Repository map
 
@@ -123,7 +124,8 @@ k6 run -e RATE=200 scripts/k6/load.js            # load test (API started with -
 | `internal/api` | Handlers, snapping, explanations, CORS, stats |
 | `web/` | Next.js frontend (`/`, `/about`, `/status`) |
 | `integration/`, `testdata/`, `scripts/k6/` | Integration tests, graph fixture, load test |
-| `docs/` | Architecture, API, deployment, benchmarks, demo script |
+| `deploy/k8s/`, `scripts/k8s-up.sh` | Kubernetes manifests (Kustomize) and the kind deploy + smoke test |
+| `docs/` | Architecture, API, deployment, Kubernetes, benchmarks, demo script |
 
 ## Data coverage details
 

@@ -1,0 +1,12 @@
+# Stage 3 of 3: the Go API (2 replicas behind one Service). Applied after the migrate Job has
+# completed and, locally, after the graph has been imported: each replica loads the graph
+# from Postgres once at startup.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: passable
+
+resources:
+  - serviceaccount.yaml
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml

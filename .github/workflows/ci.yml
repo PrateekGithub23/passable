@@ -1,6 +1,7 @@
 # CI: every push and pull request runs the Go tests (unit, property, golden, race detector,
-# integration against real Postgres+Redis in Docker) and the frontend checks.
-# CD: a push to main that passes CI deploys the API to Fly.io (when FLY_API_TOKEN is set).
+# integration against real Postgres+Redis in Docker), the frontend checks, and a Trivy scan
+# plus Kubernetes (kind) smoke test of the API image.
+# CD: a push to main that passes all of them deploys the API to Fly.io (when FLY_API_TOKEN is set).
 # The frontend deploys through Vercel's GitHub integration (configured in the Vercel dashboard).
 name: CI
 
@@ -47,9 +48,51 @@ jobs:
         env:
           NEXT_PUBLIC_API_URL: https://example.invalid # build-only placeholder
 
+  # The deployable artifact itself: build the API image, scan it, then run it on Kubernetes.
+  k8s:
+    name: Image scan + Kubernetes smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build API image
+        run: docker build -t passable-api:local .
+      # Fail on any HIGH/CRITICAL vulnerability that has a fix available (unfixed ones can't be
+      # acted on). Trivy runs from its pinned official image rather than a third-party action.
+      - name: Trivy image scan
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.1 \
+            image --quiet --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 passable-api:local
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.33.0
+      # The real OSM extract for the bbox, cached so the public Overpass API is only queried
+      # when the fetch script changes (or the cache is evicted after a week unused).
+      - name: Cache OSM data
+        id: osm
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: osm-${{ hashFiles('scripts/fetch_osm.sh') }}
+      - name: Fetch OSM data
+        if: steps.osm.outputs.cache-hit != 'true'
+        run: scripts/fetch_osm.sh
+      # Same script as local development: kind cluster, Postgres+PostGIS, Redis, NetworkPolicies,
+      # migration Job, graph import, 2 API replicas; then health, a real route, and a hazard
+      # posted to one replica arriving over WebSocket on the other (via Redis pub/sub).
+      - name: Deploy to kind and smoke-test
+        run: scripts/k8s-up.sh
+      - name: Cluster state (on failure)
+        if: failure()
+        run: |
+          kubectl -n passable get all,networkpolicy
+          kubectl -n passable describe pods | tail -60
+          kubectl -n passable logs -l app=passable-api --tail=50 || true
+
   deploy-api:
     name: Deploy API to Fly.io
-    needs: [go, web]
+    needs: [go, web, k8s]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency: deploy-api # never two deploys at once

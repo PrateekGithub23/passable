@@ -1,0 +1,83 @@
+# The Go API. Two replicas, so hazard events really travel between instances over Redis
+# pub/sub (each replica holds its own in-memory graph and copy-on-write hazard overlay).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: passable-api
+spec:
+  replicas: 2
+  # Rolling update that never drops below 2 ready pods: start a new pod, wait until it's
+  # ready (graph loaded, DB reachable), then stop an old one.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: passable-api
+  template:
+    metadata:
+      labels:
+        app: passable-api
+        passable/db-client: "true" # allowed through the Postgres NetworkPolicy
+    spec:
+      serviceAccountName: passable-api
+      automountServiceAccountToken: false
+      # The API handles SIGTERM: it stops accepting connections and gives in-flight
+      # requests 5 s to finish (cmd/api), well inside this grace period.
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # distroless "nonroot"
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: passable-api:local
+          imagePullPolicy: Never # loaded into the cluster by `kind load`, not pulled
+          envFrom:
+            - configMapRef:
+                name: passable-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: passable-secrets
+                  key: DATABASE_URL
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: passable-secrets
+                  key: REDIS_URL
+          ports:
+            - name: http
+              containerPort: 8080
+          # Startup: give the graph load (~2 s) and first DB connection time before the
+          # other probes start counting failures.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          # Ready = /healthz answers, which pings Postgres. A pod that can't reach the
+          # database is taken out of the Service but not restarted.
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          # Alive = the process accepts connections. Deliberately not /healthz: a database
+          # outage would otherwise restart every replica, which wouldn't fix anything.
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 20
+          resources:
+            # The graph is ~9 MiB of heap; 512 Mi leaves headroom for caches and WebSockets.
+            # No CPU limit: throttling would add routing latency; the request reserves a share.
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # the API writes nothing to disk
+            capabilities:
+              drop: ["ALL"]

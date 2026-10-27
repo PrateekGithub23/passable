@@ -1,0 +1,12 @@
+# One stable address for both replicas; kube-proxy spreads connections across ready pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: passable-api
+spec:
+  selector:
+    app: passable-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

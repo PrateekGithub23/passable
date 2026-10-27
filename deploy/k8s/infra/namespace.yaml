@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: passable
+  labels:
+    # Pod Security Admission: warn about (but still admit) pods that break the "restricted"
+    # profile. The API and Redis pods meet it; the Postgres image needs root to start.
+    pod-security.kubernetes.io/warn: restricted

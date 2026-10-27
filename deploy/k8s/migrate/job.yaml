@@ -1,0 +1,41 @@
+# One-shot migration run, using the same image as the API (it contains /app/migrate).
+# goose records applied versions, so re-running it is safe; Jobs are immutable, so the script
+# deletes the previous one before applying.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: passable-migrate
+spec:
+  backoffLimit: 6 # retries with backoff if Postgres isn't accepting connections yet
+  template:
+    metadata:
+      labels:
+        app: passable-migrate
+        passable/db-client: "true" # allowed through the Postgres NetworkPolicy
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # distroless "nonroot"
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: passable-api:local
+          imagePullPolicy: Never # loaded into the cluster by `kind load`, not pulled
+          command: ["/app/migrate"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: passable-secrets
+                  key: DATABASE_URL
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
