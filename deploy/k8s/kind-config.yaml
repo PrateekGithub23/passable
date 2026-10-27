@@ -1,0 +1,8 @@
+# Local Kubernetes cluster for Passable (kind = "Kubernetes in Docker": each node is a container).
+# One node is enough to exercise the deployment: 2 API replicas, Postgres, Redis, probes,
+# NetworkPolicies. Created by scripts/k8s-up.sh; delete with `kind delete cluster --name passable`.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: passable
+nodes:
+  - role: control-plane

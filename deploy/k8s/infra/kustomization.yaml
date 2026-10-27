@@ -1,0 +1,33 @@
+# Stage 1 of 3 (see scripts/k8s-up.sh): namespace, config, secrets, Postgres+PostGIS, Redis,
+# and the NetworkPolicies that fence them off. Stage 2 runs migrations, stage 3 the API.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: passable
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - redis.yaml
+  - networkpolicy.yaml
+
+# Fixed names (no content hash) so the migrate and api stages, applied separately, can refer to them.
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: passable-config
+    literals:
+      - PORT=8080
+      - CORS_ORIGINS=http://localhost:3000
+      - EXPIRY_INTERVAL=30s
+
+# Local-cluster credentials only, the same throwaway values as docker-compose.yml. A real
+# cluster would get these from a secret manager (e.g. External Secrets), never from git.
+secretGenerator:
+  - name: passable-secrets
+    literals:
+      - POSTGRES_USER=passable
+      - POSTGRES_PASSWORD=passable
+      - POSTGRES_DB=passable
+      - DATABASE_URL=postgres://passable:passable@postgres:5432/passable
+      - REDIS_URL=redis://redis:6379/0

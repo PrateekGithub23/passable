@@ -1,0 +1,8 @@
+# Stage 2 of 3: apply database migrations before any API pod starts (the Kubernetes version
+# of Fly's release_command in fly.toml). scripts/k8s-up.sh waits for this Job to complete.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: passable
+
+resources:
+  - job.yaml

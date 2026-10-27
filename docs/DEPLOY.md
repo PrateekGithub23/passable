@@ -18,7 +18,9 @@ git push origin main
    ├─► GitHub Actions (.github/workflows/ci.yml)
    │     ├─ "Go tests"        gofmt · vet · race tests · integration tests (Postgres+Redis in Docker)
    │     ├─ "Frontend checks" lint · typecheck · build
-   │     └─ "Deploy API"      only if both pass: flyctl deploy --remote-only (secrets.FLY_API_TOKEN)
+   │     ├─ "Image scan + Kubernetes smoke test"  Trivy (fails on fixable HIGH/CRITICAL) ·
+   │     │                    deploy to kind, route + cross-replica live update (docs/KUBERNETES.md)
+   │     └─ "Deploy API"      only if all three pass: flyctl deploy --remote-only (secrets.FLY_API_TOKEN)
    │            1. Fly builds the Docker image on its remote builder
    │            2. release_command /app/migrate runs against Neon; a failed migration stops the deploy
    │            3. the API machine restarts on the new image and loads the graph (~1.5 s)
@@ -27,7 +29,7 @@ git push origin main
 ```
 
 - **Brief restart:** there's one API machine, so an API deploy restarts it for a few seconds. Open maps reconnect their WebSocket automatically.
-- **Vercel doesn't wait for CI.** A failing test blocks the API deploy but not the site deploy.
+- **Vercel doesn't wait for CI.** A failing test or scan blocks the API deploy but not the site deploy.
 - **Pull requests** get Vercel preview URLs. Previews can't call the API, because their origins aren't in `CORS_ORIGINS`.
 - **Rollback:** API with `fly releases` and `fly deploy --image <previous image>`. Site with "Instant Rollback" in the Vercel dashboard.
 - **Every push to `main` deploys,** including documentation-only changes.

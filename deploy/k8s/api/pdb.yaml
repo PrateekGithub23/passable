@@ -1,0 +1,10 @@
+# Voluntary disruptions (node drains, cluster upgrades) may evict at most one API pod at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: passable-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: passable-api
