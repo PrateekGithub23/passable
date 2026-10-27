@@ -14,6 +14,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api \
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ /app/
 EXPOSE 8080
-# Runs as the image's non-root user. /app/migrate is run by Fly's release_command before each
-# deploy (see fly.toml); CMD (not ENTRYPOINT) so that command can replace it.
+# Links the published image (ghcr.io) to its source repository.
+LABEL org.opencontainers.image.source=https://github.com/PrateekGithub23/passable
+# Runs as the image's non-root user. /app/migrate is run before each deploy (by CI in
+# production, by a Job on Kubernetes); CMD (not ENTRYPOINT) so that command can replace it.
 CMD ["/app/api"]

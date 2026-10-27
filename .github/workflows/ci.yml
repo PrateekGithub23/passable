@@ -1,7 +1,8 @@
 # CI: every push and pull request runs the Go tests (unit, property, golden, race detector,
 # integration against real Postgres+Redis in Docker), the frontend checks, and a Trivy scan
 # plus Kubernetes (kind) smoke test of the API image.
-# CD: a push to main that passes all of them deploys the API to Fly.io (when FLY_API_TOKEN is set).
+# CD: a push to main that passes all of them deploys the API to Azure Container Apps (once the
+# AZURE_* secrets are set; see scripts/azure-setup.sh).
 # The frontend deploys through Vercel's GitHub integration (configured in the Vercel dashboard).
 name: CI
 
@@ -90,21 +91,51 @@ jobs:
           kubectl -n passable describe pods | tail -60
           kubectl -n passable logs -l app=passable-api --tail=50 || true
 
+  # Production: Azure Container Apps (DECISIONS #34). The image goes to GitHub Container
+  # Registry (free for public images); Azure pulls it from there.
   deploy-api:
-    name: Deploy API to Fly.io
+    name: Deploy API to Azure Container Apps
     needs: [go, web, k8s]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency: deploy-api # never two deploys at once
+    permissions:
+      contents: read
+      packages: write # push the image to ghcr.io with the workflow's own token
+      id-token: write # OIDC: GitHub vouches for this workflow to Azure; no Azure password stored
     env:
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      IMAGE: ghcr.io/prateekgithub23/passable-api
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v5
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-        if: env.FLY_API_TOKEN != ''
-      - name: Deploy
-        if: env.FLY_API_TOKEN != ''
-        run: flyctl deploy --remote-only
-      - name: Skip (no FLY_API_TOKEN secret yet)
-        if: env.FLY_API_TOKEN == ''
-        run: echo "FLY_API_TOKEN is not set; skipping deploy."
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build and push image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+          docker push --all-tags "$IMAGE"
+      # Schema first, then code (what Fly's release_command did): a failed migration stops here.
+      - name: Migrate the production database
+        if: env.AZURE_CLIENT_ID != ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: go run ./cmd/migrate
+      - uses: azure/login@v2
+        if: env.AZURE_CLIENT_ID != ''
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # New revision on the commit's image. Container Apps starts it, waits for the startup and
+      # readiness probes (/healthz), then moves traffic over.
+      - name: Roll out
+        if: env.AZURE_CLIENT_ID != ''
+        run: |
+          az containerapp update -n passable-api -g passable-rg --image "$IMAGE:${{ github.sha }}" -o none
+          fqdn=$(az containerapp show -n passable-api -g passable-rg --query properties.configuration.ingress.fqdn -o tsv)
+          curl -fsS --retry 10 --retry-delay 6 --retry-all-errors "https://$fqdn/healthz"
+      - name: Skip (Azure not configured yet)
+        if: env.AZURE_CLIENT_ID == ''
+        run: echo "AZURE_CLIENT_ID is not set; image pushed, deploy skipped."
