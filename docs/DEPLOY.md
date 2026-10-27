@@ -4,7 +4,7 @@ Production layout:
 
 | Piece | Service | Why |
 |---|---|---|
-| Go API (routing, hazards, WebSocket) | **Fly.io** (`fly.toml`, `Dockerfile`) | Runs our Docker image; long-lived WebSocket connections; one always-on machine keeps the graph in memory |
+| Go API (routing, hazards, WebSocket) | **Fly.io** (`fly.toml`, `Dockerfile`) | Runs our Docker image; long-lived WebSocket connections; one machine holds the graph in memory; it stops when idle and starts on the next request (~2-4 s cold start) |
 | Postgres + PostGIS | **Neon** | Managed Postgres with the PostGIS and pg_trgm extensions |
 | Redis (cache, pub/sub, rate limits) | **Docker Redis** in development; in production, any compatible **free-tier hosted Redis** (see [Redis](#redis)) | Optional: the API runs without it, with reduced features |
 | Next.js frontend | **Vercel** | Builds and serves `web/`, deploys on every push via its GitHub integration |
@@ -152,4 +152,4 @@ Then:
 4. `fly secrets set REDIS_URL="$REDIS_URL"`, which restarts the API with Redis enabled.
 
 ### Running without Redis
-Set `REDIS_URL` to an empty string (`fly secrets set REDIS_URL=""`, or `REDIS_URL= go run ./cmd/api` locally). Unset means "use local Docker Redis"; empty means "Redis off". The API logs `redis disabled (REDIS_URL is empty): ...` and keeps working: routing, hazards and live updates all run on a **single** instance. If a configured Redis is unreachable at startup, the API also runs without it and logs `redis unavailable (...)`. Keep the Fly app at one machine in this mode (`min_machines_running = 1`, and don't scale out), and keep in mind that rate limiting is off.
+Set `REDIS_URL` to an empty string (`fly secrets set REDIS_URL=""`, or `REDIS_URL= go run ./cmd/api` locally). Unset means "use local Docker Redis"; empty means "Redis off". The API logs `redis disabled (REDIS_URL is empty): ...` and keeps working: routing, hazards and live updates all run on a **single** instance. If a configured Redis is unreachable at startup, the API also runs without it and logs `redis unavailable (...)`. Keep the Fly app at one machine in this mode (don't scale out), and keep in mind that rate limiting is off.

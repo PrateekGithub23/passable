@@ -25,11 +25,14 @@ primary_region = "iad"            # US East, next to Neon's us-east-1
 [http_service]
   internal_port = 8080
   force_https = true
-  # Keep one machine always running: it holds the in-memory graph and WebSocket connections,
-  # and a cold start (graph load ~0.3 s + DB wake-up) on the first request would be noticeable.
-  auto_stop_machines = "off"
+  # Scale to zero (DECISIONS #32): Fly's proxy stops the machine when no requests or WebSocket
+  # connections are open, and starts it again on the next request. That keeps the free trial's
+  # machine time for when someone is actually using the site. The cost is a cold start of
+  # ~2-4 s (boot + graph load + Neon wake-up) for the first visitor after a quiet spell.
+  # Reports that expired while it slept are expired at startup (cmd/api ExpireDue).
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
 
   [[http_service.checks]]
     grace_period = "20s"
