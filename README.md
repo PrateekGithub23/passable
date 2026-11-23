@@ -9,9 +9,22 @@ Passable plans routes for three profiles:
 
 Every route says how much it trusts the map data (mapped, assumed or not mapped). Anyone can report a hazard, such as an elevator that's out, a blocked sidewalk, construction or ice. Reports change everyone's routes within seconds. Only the people whose route is affected get a "reroute?" prompt. Reports are confirmed or resolved by votes and expire on their own.
 
-**Live demo: the API is offline** while it moves from Fly.io (free trial ended) to Azure, so routing on https://passable-alpha.vercel.app doesn't work right now. Everything runs locally in about 10 minutes (below).
+**Live demo: [passable-alpha.vercel.app](https://passable-alpha.vercel.app)** — the frontend is hosted on Vercel and the Go routing API runs on Azure Container Apps (Canada Central). Everything also runs locally in about 10 minutes (below).
 
 ![A wheelchair route across campus; a blocked sidewalk just reported by another user sits on it (red dot) and the "reroute?" prompt is showing](docs/img/live-reroute.jpg)
+
+## Production deployment
+
+| Component | Hosting |
+|---|---|
+| Frontend | Vercel (Next.js) |
+| Backend | Azure Container Apps (Canada Central) |
+| Database | Neon PostgreSQL + PostGIS |
+| Cache and pub/sub | Upstash Redis |
+| Container registry | GitHub Container Registry (GHCR) |
+| CI | GitHub Actions |
+
+GitHub Actions runs the tests, image security scan and Kubernetes smoke test before publishing the API image on successful pushes to `main`. Vercel deploys the frontend automatically. Backend releases are currently deployed manually to Azure using the published Linux AMD64 image digest; automated Azure deployment is pending directory permissions for OIDC.
 
 ## Run it locally (about 10 minutes)
 
@@ -73,8 +86,10 @@ All numbers come from real runs; details in [`docs/benchmarks/`](docs/benchmarks
 | Route cache (stable graph version) | 40% hit rate; hit p95 **1.0 ms** against 5.0 ms for a miss | k6, day 8 |
 | Report → WebSocket client, across two API instances | p50 **6.3 ms**, p95 8.4 ms, including the database write | `cmd/wsprobe`, [day6](docs/benchmarks/day6-propagation.md) |
 | Concurrency: routes vs. hazard writes | **27,055 routes** during **141,586 snapshot swaps**, all consistent, race detector clean | overlay stress test |
-| **Production:** route not in the cache, server time | **11.6 ms** average (mostly the two database queries between Fly and Neon) | `/metrics` on Fly |
-| **Production:** report in one browser → prompt in another | **470 ms** end to end, both over the internet | two-browser test on the live site |
+| **Previous production (Fly.io):** route not in the cache, server time | **11.6 ms** average (mostly the two database queries between Fly and Neon) | `/metrics` on Fly |
+| **Previous production (Fly.io):** report in one browser → prompt in another | **470 ms** end to end, both over the internet | two-browser test on the live site |
+
+The production latency measurements above were collected before the migration to Azure; they are not Azure benchmarks.
 
 ## Data coverage and limitations
 
@@ -108,7 +123,7 @@ k6 run -e RATE=200 scripts/k6/load.js            # load test (API started with -
 - **Concurrency:** a race-detector stress test of routing during constant hazard writes; the hub's targeting; the rate limiter's atomicity.
 - **Integration:** the full hazard lifecycle across two API instances on real Postgres and Redis (WebSocket delivery, cache key change, votes, expiry, gap → resync), plus a regression test for a snapping bug the load test found.
 - **Kubernetes:** `scripts/k8s-up.sh` deploys the stack to a local kind cluster (2 API replicas, migration Job, probes, NetworkPolicies) and smoke-tests it, including a hazard crossing between replicas. See [docs/KUBERNETES.md](docs/KUBERNETES.md).
-- **CI** runs all of it on every push, plus a Trivy scan of the API image and the kind deploy, and a push to `main` that passes deploys the API to Azure Container Apps once the Azure secrets are configured (`scripts/azure-setup.sh`). The site deploys from the same push through Vercel ([how deployment works](docs/DEPLOY.md#how-continuous-deployment-works)).
+- **CI** runs all of it on pushes to `main` and pull requests, plus a Trivy scan of the API image and the kind deploy. Successful pushes to `main` publish the API image to GHCR. Vercel deploys the frontend automatically; Azure backend deployment is currently manual, with automated OIDC deployment supported by the workflow once the required permissions and secrets are configured (`scripts/azure-setup.sh`).
 
 ## Repository map
 
