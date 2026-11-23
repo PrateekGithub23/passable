@@ -112,6 +112,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build and push image
+        if: env.AZURE_CLIENT_ID != '' # nothing to deploy to until Azure is set up
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .

@@ -9,7 +9,7 @@ Passable plans routes for three profiles:
 
 Every route says how much it trusts the map data (mapped, assumed or not mapped). Anyone can report a hazard, such as an elevator that's out, a blocked sidewalk, construction or ice. Reports change everyone's routes within seconds. Only the people whose route is affected get a "reroute?" prompt. Reports are confirmed or resolved by votes and expire on their own.
 
-**Live:** https://passable-alpha.vercel.app · [status](https://passable-alpha.vercel.app/status) · [about & limitations](https://passable-alpha.vercel.app/about) · API: https://passable-api.fly.dev
+**Live demo: the API is offline** while it moves from Fly.io (free trial ended) to Azure, so routing on https://passable-alpha.vercel.app doesn't work right now. Everything runs locally in about 10 minutes (below).
 
 ![A wheelchair route across campus; a blocked sidewalk just reported by another user sits on it (red dot) and the "reroute?" prompt is showing](docs/img/live-reroute.jpg)
 
@@ -108,7 +108,7 @@ k6 run -e RATE=200 scripts/k6/load.js            # load test (API started with -
 - **Concurrency:** a race-detector stress test of routing during constant hazard writes; the hub's targeting; the rate limiter's atomicity.
 - **Integration:** the full hazard lifecycle across two API instances on real Postgres and Redis (WebSocket delivery, cache key change, votes, expiry, gap → resync), plus a regression test for a snapping bug the load test found.
 - **Kubernetes:** `scripts/k8s-up.sh` deploys the stack to a local kind cluster (2 API replicas, migration Job, probes, NetworkPolicies) and smoke-tests it, including a hazard crossing between replicas. See [docs/KUBERNETES.md](docs/KUBERNETES.md).
-- **CI** runs all of it on every push, plus a Trivy scan of the API image and the kind deploy, and a push to `main` that passes deploys the API to Fly.io. The site deploys from the same push through Vercel ([how deployment works](docs/DEPLOY.md#how-continuous-deployment-works)).
+- **CI** runs all of it on every push, plus a Trivy scan of the API image and the kind deploy, and a push to `main` that passes deploys the API to Azure Container Apps once the Azure secrets are configured (`scripts/azure-setup.sh`). The site deploys from the same push through Vercel ([how deployment works](docs/DEPLOY.md#how-continuous-deployment-works)).
 
 ## Repository map
 
